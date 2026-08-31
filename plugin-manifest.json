@@ -1,0 +1,13 @@
+{
+  "manifest": {
+    "slug": "failovarr",
+    "name": "Failovarr",
+    "latest": {
+      "version": "0.0.0",
+      "url": "",
+      "sha256": "",
+      "size": 0
+    },
+    "versions": []
+  }
+}

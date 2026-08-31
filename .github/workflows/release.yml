@@ -1,0 +1,110 @@
+name: release
+
+# Publish a new plugin version. Trigger by pushing a tag, e.g.:
+#   git tag v0.1.0 && git push github v0.1.0
+# Builds the install zip, computes its sha256, refreshes manifest.json +
+# plugin-manifest.json on main, and creates a GitHub Release with the zip.
+# Dispatcharr then sees the new version via the raw manifest URL.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Derive version from tag
+        id: v
+        run: |
+          TAG="${GITHUB_REF_NAME}"        # e.g. v0.1.0
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          PV=$(jq -r .version plugin.json)
+          if [ "$PV" != "$VERSION" ]; then
+            echo "::error::plugin.json version ($PV) does not match tag ($VERSION)"
+            exit 1
+          fi
+
+      - name: Syntax check plugin.py
+        run: python3 -m py_compile plugin.py
+
+      - name: Build install zip
+        id: build
+        run: |
+          VERSION="${{ steps.v.outputs.version }}"
+          rm -rf dist && mkdir -p dist/failovarr
+          cp plugin.py plugin.json logo.png README.md LICENSE CHANGELOG.md dist/failovarr/
+          ASSET="failovarr-$VERSION.zip"
+          (cd dist && zip -r "../$ASSET" failovarr >/dev/null)
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "sha=$(sha256sum "$ASSET" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$ASSET")" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh manifests
+        run: |
+          VERSION="${{ steps.v.outputs.version }}"
+          SHA="${{ steps.build.outputs.sha }}"
+          SIZE=${{ steps.build.outputs.size }}
+          URL="v$VERSION/failovarr-$VERSION.zip"
+          jq --arg v "$VERSION" --arg sha "$SHA" --arg url "$URL" --argjson size "$SIZE" '
+            .generated_at = (now | todateiso8601)
+            | .manifest.plugins[0].latest_version = $v
+            | .manifest.plugins[0].latest_sha256 = $sha
+            | .manifest.plugins[0].latest_url = $url
+            | .manifest.plugins[0].latest_size = $size
+          ' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+          jq --arg v "$VERSION" --arg sha "$SHA" --arg url "$URL" --argjson size "$SIZE" '
+            .manifest.latest = {version:$v, url:$url, sha256:$sha, size:$size}
+            | .manifest.versions = ([{version:$v, url:$url, sha256:$sha, size:$size, min_dispatcharr_version:"v0.20.0"}]
+                + (.manifest.versions | map(select(.version != $v))))
+          ' plugin-manifest.json > pm.tmp && mv pm.tmp plugin-manifest.json
+
+      - name: Sign manifests (GPG, optional)
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "No GPG_PRIVATE_KEY secret set — publishing unsigned."
+            exit 0
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
+          sign() {
+            f="$1"
+            # Canonical bytes = exactly what Dispatcharr recomputes to verify:
+            #   json.dumps(manifest_obj, separators=(",",":")) + "\n"
+            python3 -c "import json,sys; m=json.load(open('$f'))['manifest']; sys.stdout.buffer.write((json.dumps(m,separators=(',',':'))+chr(10)).encode())" > canon.bin
+            gpg --batch --yes --pinentry-mode loopback --armor --detach-sign \
+                --local-user "$KEYID" -o sig.asc canon.bin
+            jq --arg sig "$(cat sig.asc)" '.signature = $sig' "$f" > t.json && mv t.json "$f"
+            rm -f canon.bin sig.asc
+          }
+          sign manifest.json
+          sign plugin-manifest.json
+          echo "Signed manifest.json and plugin-manifest.json with key $KEYID"
+
+      - name: Commit refreshed manifests
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json plugin-manifest.json
+          git commit -m "chore: manifest for v${{ steps.v.outputs.version }}" || echo "no manifest changes"
+          git push origin main
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: v${{ steps.v.outputs.version }}
+          files: ${{ steps.build.outputs.asset }}
+          body_path: CHANGELOG.md

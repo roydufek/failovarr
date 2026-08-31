@@ -1,0 +1,25 @@
+{
+  "generated_at": "1970-01-01T00:00:00Z",
+  "manifest": {
+    "registry_name": "roydufek/failovarr",
+    "registry_url": "https://github.com/roydufek/failovarr",
+    "root_url": "https://github.com/roydufek/failovarr/releases/download",
+    "metadata_base_url": "https://raw.githubusercontent.com/roydufek/failovarr/main",
+    "plugins": [
+      {
+        "slug": "failovarr",
+        "name": "Failovarr",
+        "description": "Consolidate N IPTV providers into unified channels with cross-provider failover, by deterministic normalized-name matching (no fuzzy). One channel per normalized name, both providers' streams stacked as failover, so a channel enabled on either provider is never lost. Locals key on callsign; PPV/event groups skipped; adult split; deterministic EPG match with free logos. In-place reconcile, safe to run daily.",
+        "author": "Roy Dufek",
+        "license": "MIT",
+        "manifest_url": "https://raw.githubusercontent.com/roydufek/failovarr/main/plugin-manifest.json",
+        "icon_url": "https://raw.githubusercontent.com/roydufek/failovarr/main/logo.png",
+        "latest_version": "0.0.0",
+        "latest_sha256": "",
+        "latest_url": "",
+        "latest_size": 0,
+        "min_dispatcharr_version": "v0.20.0"
+      }
+    ]
+  }
+}

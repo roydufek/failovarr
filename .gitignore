@@ -1,0 +1,10 @@
+.env
+.env*.local
+__pycache__/
+*.pyc
+last_run.json
+.sched/
+backup_*.json
+keymap.json
+health.json
+dist/

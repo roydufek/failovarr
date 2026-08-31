@@ -1,0 +1,27 @@
+# Changelog
+
+## v0.1.0
+
+Initial release.
+
+- **Cross-provider consolidation with failover.** Unions N IPTV providers (e.g.
+  trex + strong) into single channels by deterministic normalized-name matching —
+  no fuzzy scoring. A channel enabled on *either* provider is never lost; when both
+  carry it, each provider's stream is stacked as failover in priority order.
+- **Deterministic normalize-and-group.** Providers name the same channel
+  near-identically (`US| CNN HD` vs `US: CNN HD`); the matcher strips the region
+  prefix, folds superscripts, drops quality tags, and groups. Locals key on
+  **callsign** (never city). PPV/event groups are skipped. Foreign-country prefixes
+  are filtered (keeping US-market channels regardless of language).
+- **Adult split.** Channels in adult groups route to the +18 profile only;
+  everything else lands in both the base and +18 profiles.
+- **Deterministic EPG matching + free logos.** Maps each channel to a real
+  myepg.top guide entry by name (two-key strategy), sets `epg_data`/`tvg_id`, and
+  triggers a refresh that pulls schedules and applies logos in one pass.
+- **In-place reconcile — never wipe-and-rebuild.** Upserts by normalized key so a
+  daily run preserves channel numbers, EPG mappings, and manual tweaks. A one-time
+  **Seed / reset** action is provided for the initial build.
+- **Safety machinery** carried over from streammirrarr: pre-run backups to a
+  persistent directory, a channel-collapse health guard (skips destructive work +
+  alerts on a provider-outage wipe), Gotify notifications, a cross-process run lock,
+  and a daily scheduler.

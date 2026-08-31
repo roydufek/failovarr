@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.7
+
+- **Locals group under their network.** A local station now lands in its network
+  group (ABC/NBC/CBS/FOX) rather than whichever package feed was seen first, so an
+  affiliate merged from an `ABC NETWORK` feed and a `DirecTV city` feed sits under
+  `ABC` with the rest, not in a `DirecTV city` bucket.
+
 ## v0.1.6
 
 - **Clean 4K group names.** Groups a provider names purely by resolution (e.g.

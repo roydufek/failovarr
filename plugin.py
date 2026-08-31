@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -1019,6 +1019,7 @@ class Plugin:
                 # feed) still merges by callsign.
                 key = None
                 callsign = None
+                local_net = None
                 net = _local_network(gname)
                 if not net and cfg["locals_by_name"]:
                     net = _local_network(name)
@@ -1026,6 +1027,7 @@ class Plugin:
                     callsign = _callsign(name)
                     if callsign:
                         key = f"{net} {callsign}"
+                        local_net = net  # group locals under their network, not the package
                 if key is None:
                     key = _consolidation_key(name, region_allow, cfg["merge_quality"])
                 if not key:
@@ -1039,9 +1041,10 @@ class Plugin:
                         "is_adult": is_adult,
                         "epg_key": _epg_key(name),
                         "callsign": callsign,
-                        # group from the FIRST (highest-priority provider) stream seen
-                        # for this key = the primary's category.
-                        "group": _group_display(gname, cfg["merge_group_suffixes"]),
+                        # Group: a local sits under its NETWORK (ABC/NBC/CBS/FOX) so
+                        # affiliates from different packages land together; everything
+                        # else takes its primary stream's cleaned provider category.
+                        "group": local_net if local_net else _group_display(gname, cfg["merge_group_suffixes"]),
                         "prov": {},
                     }
                 else:

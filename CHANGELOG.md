@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.9
+
+- **Auto-names refresh when the channel changes — manual renames respected.** When a
+  key's contents shift (e.g. the AMC/AMC+ split) the channel's display name is
+  recomputed, but only if you haven't hand-renamed it: the keymap tracks the last
+  auto-name, so a name you set yourself is never overwritten. Fixes channels left
+  showing a stale name after a matching change.
+
 ## v0.1.8
 
 - **`+` brands stay distinct.** `AMC` and `AMC+` (and `Paramount`/`Paramount+`, etc.)

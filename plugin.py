@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -1110,7 +1110,9 @@ class Plugin:
         cs_rows = []
         mem_rows = []
         for ch, (k, is_adult, streams, cnum) in zip(created_objs, order):
-            keymap[k] = {"id": ch.id, "num": cnum}
+            # store the computed display in the keymap so reconcile can tell an
+            # untouched auto-name from one the user has manually renamed.
+            keymap[k] = {"id": ch.id, "num": cnum, "name": ch.name}
             for o, spk in enumerate(streams):
                 cs_rows.append(ChannelStream(channel_id=ch.id, stream_id=spk, order=o))
             # Membership: adult profile always; base only for non-adult.
@@ -1139,11 +1141,11 @@ class Plugin:
         ):
             cur.setdefault(ch_id, {})[spk] = (o, cs_id)
 
-        # current adult flag + group per channel
+        # current adult flag + group + name per channel
         info_now = {
-            cid: (ad, gid)
-            for cid, ad, gid in Channel.objects.filter(id__in=ch_ids)
-            .values_list("id", "is_adult", "channel_group_id")
+            cid: (ad, gid, nm)
+            for cid, ad, gid, nm in Channel.objects.filter(id__in=ch_ids)
+            .values_list("id", "is_adult", "channel_group_id", "name")
         }
         mem_now = set()
         for pid, cid in ChannelProfileMembership.objects.filter(
@@ -1154,6 +1156,7 @@ class Plugin:
         to_create_cs, to_update_cs, to_delete_cs = [], [], []
         adult_flip = []
         group_flip = []
+        name_flip = []
         mem_add = []
         changed = 0
 
@@ -1179,7 +1182,7 @@ class Plugin:
                     to_delete_cs.append(cs_id)
                     local_changed = True
 
-            cur_adult, cur_gid = info_now.get(ch_id, (None, None))
+            cur_adult, cur_gid, cur_name = info_now.get(ch_id, (None, None, None))
             if cur_adult != b["is_adult"]:
                 adult_flip.append((ch_id, b["is_adult"]))
                 local_changed = True
@@ -1187,6 +1190,18 @@ class Plugin:
             if cur_gid != desired_g.id:
                 group_flip.append((ch_id, desired_g.id))
                 local_changed = True
+            # Refresh the display name if the channel's key contents changed it — but
+            # ONLY when the user hasn't manually renamed it (current name still equals
+            # the last name we computed, tracked in the keymap; absent = migrate).
+            desired_name = (b["display"] or k)[:255]
+            stored_name = keymap[k].get("name")
+            auto_owned = stored_name is None or stored_name == cur_name
+            if auto_owned and cur_name != desired_name:
+                name_flip.append((ch_id, desired_name))
+                keymap[k]["name"] = desired_name
+                local_changed = True
+            elif stored_name is None:
+                keymap[k]["name"] = cur_name  # record baseline (possibly a manual name)
 
             if (adult_prof.id, ch_id) not in mem_now:
                 mem_add.append(ChannelProfileMembership(channel_profile=adult_prof, channel_id=ch_id, enabled=True))
@@ -1218,6 +1233,8 @@ class Plugin:
                 ChannelProfileMembership.objects.bulk_create(chunk, ignore_conflicts=True)
         for ch_id, val in adult_flip:
             Channel.objects.filter(id=ch_id).update(is_adult=val)
+        for ch_id, val in name_flip:
+            Channel.objects.filter(id=ch_id).update(name=val)
         if group_flip:
             by_g = {}
             for ch_id, gid in group_flip:

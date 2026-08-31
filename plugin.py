@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -510,7 +510,7 @@ class Plugin:
         {
             "id": "ppv_refresh",
             "label": "🥊 Refresh PPV events now",
-            "description": "Build/update live PPV event channels with cross-provider failover, and remove ended ones. Requires 'PPV events' enabled in settings.",
+            "description": "With 'PPV events' ON: build/update live PPV event channels with failover and remove ended ones. With it OFF: remove all PPV channels (clean off-switch).",
             "button_label": "Refresh PPV",
             "button_variant": "filled",
         },
@@ -1615,12 +1615,17 @@ class Plugin:
         cfg = self._engine_cfg(settings, region_allow)
         base_prof, adult_prof = self._get_profiles(settings)
 
-        buckets, gstats = self._gather_ppv(providers, cfg)
-        # Keep only events carried by at least ppv_min_providers (2 = cross-provider
-        # failover pairs only; 1 = every live event, "management" mode).
-        minp = cfg["ppv_min_providers"]
-        if minp > 1:
-            buckets = {k: b for k, b in buckets.items() if len(b["prov"]) >= minp}
+        if cfg["ppv_events"]:
+            buckets, gstats = self._gather_ppv(providers, cfg)
+            # Keep only events carried by at least ppv_min_providers (2 = cross-provider
+            # failover pairs only; 1 = every live event, "management" mode).
+            minp = cfg["ppv_min_providers"]
+            if minp > 1:
+                buckets = {k: b for k, b in buckets.items() if len(b["prov"]) >= minp}
+        else:
+            # PPV turned OFF -> desired set is empty, so a refresh removes every PPV
+            # channel (turn it off, hit Refresh, they're gone — a clean off-switch).
+            buckets, gstats = {}, {"scanned": 0, "idle": 0, "done": 0, "pairs": 0, "single": 0}
         keymap = self._read_ppv_keymap()
         if keymap:
             live = set(Channel.objects.filter(id__in=[v["id"] for v in keymap.values()]).values_list("id", flat=True))
@@ -1652,11 +1657,14 @@ class Plugin:
         }
 
         if dry_run:
-            report["message"] = (
-                f"DRY-RUN PPV: {len(buckets)} live/upcoming events "
-                f"({gstats['pairs']} cross-provider failover pairs, {gstats['single']} single). "
-                f"Would create {len(to_create)}, prune {len(to_prune)}, keep {len(common)}."
-            )
+            if not cfg["ppv_events"]:
+                report["message"] = f"DRY-RUN PPV: disabled — would remove {len(to_prune)} PPV channel(s)."
+            else:
+                report["message"] = (
+                    f"DRY-RUN PPV: {len(buckets)} live/upcoming events "
+                    f"({gstats['pairs']} cross-provider failover pairs, {gstats['single']} single). "
+                    f"Would create {len(to_create)}, prune {len(to_prune)}, keep {len(common)}."
+                )
             self._write_status(report)
             self._ws_done(report["message"], dry_run=True)
             return report
@@ -1678,10 +1686,13 @@ class Plugin:
 
         report["stats"].update({"created": created, "updated": updated, "pruned": pruned})
         report["finished"] = _iso(_now())
-        report["message"] = (
-            f"PPV: {created} events added, {updated} updated, {pruned} ended/removed "
-            f"({len(buckets)} live now: {gstats['pairs']} failover pairs, {gstats['single']} single)."
-        )
+        if not cfg["ppv_events"]:
+            report["message"] = f"PPV disabled — removed {pruned} event channel(s)."
+        else:
+            report["message"] = (
+                f"PPV: {created} events added, {updated} updated, {pruned} ended/removed "
+                f"({len(buckets)} live now: {gstats['pairs']} failover pairs, {gstats['single']} single)."
+            )
         self._write_status(report)
         logger.info("[Failovarr] %s", report["message"])
         self._ws_done(report["message"])

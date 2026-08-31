@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.2
+
+- **"Refresh PPV events" is now a clean on/off switch.** With **PPV events** ON it
+  builds/updates the event channels as before; with it **OFF** a refresh removes every
+  PPV channel. So turning PPV off and hitting Refresh cleanly deletes them (previously
+  the button built them regardless of the toggle). The stable channel set is untouched
+  either way.
+
 ## v0.2.1
 
 - **PPV refreshes once daily by default, not every 30 min.** IPTV clients pull the

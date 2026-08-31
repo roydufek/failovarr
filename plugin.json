@@ -1,6 +1,6 @@
 {
   "name": "Failovarr",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Consolidate N IPTV providers into unified channels with cross-provider failover, by deterministic normalized-name matching (no fuzzy). Built for running two subs (e.g. Trex + Strong) as mutual backups: one channel per normalized name, both providers' streams stacked as failover, so a channel enabled on either provider is never lost. Locals key on callsign; PPV/event groups skipped; adult split to a +18 profile; deterministic EPG match with free logos. In-place reconcile, safe to run daily.",
   "author": "Roy Dufek",
   "license": "MIT",
@@ -43,7 +43,7 @@
     {
       "id": "ppv_refresh",
       "label": "🥊 Refresh PPV events now",
-      "description": "Build/update live PPV event channels with cross-provider failover, and remove ended ones. Requires 'PPV events' enabled in settings.",
+      "description": "With 'PPV events' ON: build/update live PPV event channels with cross-provider failover and remove ended ones. With it OFF: remove all PPV event channels (clean off-switch).",
       "button_label": "Refresh PPV",
       "button_variant": "filled"
     },

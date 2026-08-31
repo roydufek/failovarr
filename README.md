@@ -87,7 +87,22 @@ The release manifests are **GPG-signed**. To get the ✓ *Verified Signature* ba
 in Dispatcharr, paste the public key below into the repo's **public key** field when
 you add it. This is optional — installs work fine unsigned.
 
-<!-- FAILOVARR_PUBKEY: inserted at first signed release -->
+<details>
+<summary><strong>Failovarr signing public key</strong></summary>
+
+```
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mDMEapXFDRYJKwYBBAHaRw8BAQdAWfTghA3bApjxc6xXx4KHyy7XyvxQgHUzvW3E
+gLTHPYa0LkZhaWxvdmFyciBTaWduaW5nIEtleSA8ZmFpbG92YXJyQHJveWR1ZmVr
+LmNvbT6IkAQTFgoAOBYhBNtMr9OvVES3jVGdmGLm/HE84yd+BQJqlcUNAhsDBQsJ
+CAcCBhUKCQgLAgQWAgMBAh4BAheAAAoJEGLm/HE84yd+ln4A/3p4UYwBwv9DqPsa
+lNo21V1sZz767cb2EseyyB8RgzqUAPwJAp2kp14jEUcwUBRJtymQrF3fjwcf1XPb
+Q+hTvLOrAQ==
+=UkuY
+-----END PGP PUBLIC KEY BLOCK-----
+```
+</details>
 
 **Manual zip upload:** Download a release zip (or run `bash build.sh`) and use
 **Plugins → Import** to upload it.

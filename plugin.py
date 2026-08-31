@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -158,7 +158,7 @@ _SCHED_DEFAULTS = {
     "ppv_groups": _PPV_DEFAULT_GROUPS,
     "ppv_skip": _PPV_SKIP_DEFAULT,
     "ppv_number_start": 90000,
-    "ppv_schedule_minutes": 30,
+    "ppv_schedule_minutes": 0,
     "skip_stale": True,
     "schedule_time": "",
     "gotify_notify": "off",
@@ -794,11 +794,17 @@ class Plugin:
             },
             {
                 "id": "ppv_schedule_minutes",
-                "label": "PPV refresh interval (minutes)",
+                "label": "Extra PPV refresh interval (minutes, 0 = daily only)",
                 "type": "number",
-                "default": 30,
-                "min": 5,
-                "help_text": "How often to refresh PPV events when enabled. They rotate hourly, so 15–30 min keeps the list live.",
+                "default": 0,
+                "min": 0,
+                "help_text": (
+                    "PPV events refresh once with the daily reconcile by default (0) — a "
+                    "once-a-day IPTV client only sees a daily snapshot anyway, and "
+                    "cross-provider failover works during playback with no refresh. Only "
+                    "set this (e.g. 120–360) if your client pulls the playlist several "
+                    "times a day and you want fresher event listings."
+                ),
             },
             {
                 "id": "ppv_number_start",
@@ -1736,7 +1742,7 @@ class Plugin:
             "ppv_groups": settings.get("ppv_groups", _PPV_DEFAULT_GROUPS),
             "ppv_skip": settings.get("ppv_skip", _PPV_SKIP_DEFAULT),
             "ppv_number_start": int(settings.get("ppv_number_start", 90000) or 90000),
-            "ppv_schedule_minutes": int(settings.get("ppv_schedule_minutes", 30) or 30),
+            "ppv_schedule_minutes": int(settings.get("ppv_schedule_minutes", 0) or 0),
         }
 
     # ----------------------------------------------------------- profiles/group
@@ -2027,6 +2033,15 @@ class Plugin:
             message = (report or {}).get("message", "no report")
             st = (report or {}).get("stats", {}) or {}
             changed = (st.get("created", 0) or 0) + (st.get("updated", 0) or 0) + (st.get("pruned", 0) or 0)
+            # Refresh PPV events once, right after the daily reconcile — a once-a-day
+            # client only sees a daily snapshot anyway, and failover works at playback
+            # without a refresh. (Intra-day cadence is opt-in via _ppv_tick.)
+            if ok and bool(cfg.get("ppv_events", False)):
+                try:
+                    prep = self._ppv_job(dry_run=False, settings=cfg)
+                    message += f" | {(prep or {}).get('message', 'PPV done')}"
+                except Exception:
+                    logger.exception("failovarr daily PPV refresh failed")
             if ok:
                 _touch(success_marker)
                 self._cleanup_markers()
@@ -2040,10 +2055,15 @@ class Plugin:
             self._notify_gotify(cfg, ok, message, changed)
 
     def _ppv_tick(self, cfg):
-        """Frequent PPV-event refresh (its own cadence, shares the run lock)."""
+        """OPTIONAL intra-day PPV refresh, for clients that pull the playlist more than
+        once a day. Off by default (0) — PPV normally refreshes once with the daily
+        reconcile, which is all a once-a-day client can see anyway. Shares the run lock."""
         if not bool(cfg.get("ppv_events", False)):
             return
-        interval = max(5, int(cfg.get("ppv_schedule_minutes", 30) or 30)) * 60
+        minutes = int(cfg.get("ppv_schedule_minutes", 0) or 0)
+        if minutes <= 0:
+            return
+        interval = max(5, minutes) * 60
         marker = os.path.join(SCHED_DIR, "ppv_last.ts")
         last = self._read_ts(marker)
         if last and (time.time() - last) < interval:

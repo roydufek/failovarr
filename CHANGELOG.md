@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.1
+
+- **PPV refreshes once daily by default, not every 30 min.** IPTV clients pull the
+  playlist about once a day, so frequent PPV churn was mostly invisible to the client
+  (and could create/expire an event entirely between client pulls). PPV now refreshes
+  once, folded into the daily reconcile — and cross-provider failover works during
+  playback with no refresh anyway. The intra-day cadence (`ppv_schedule_minutes`) is
+  now opt-in (default 0), for clients that pull the playlist several times a day.
+
 ## v0.2.0
 
 **PPV / live-event failover (experimental, opt-in).** The headline feature: surface

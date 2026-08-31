@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.9"
+__version__ = "0.2.0"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -98,6 +98,9 @@ try:
 except Exception:
     DATA_DIR = PLUGIN_DIR
 KEYMAP_FILE = os.path.join(DATA_DIR, "keymap.json")
+# PPV events are ephemeral and churn constantly, so they get their OWN keymap and are
+# kept out of the stable channel set's ownership/health accounting entirely.
+PPV_KEYMAP_FILE = os.path.join(DATA_DIR, "ppv_keymap.json")
 HEALTH_FILE = os.path.join(DATA_DIR, "health.json")
 BACKUP_GLOB = os.path.join(DATA_DIR, "backup_*.json")
 
@@ -121,6 +124,13 @@ DEFAULT_SKIP_GROUPS = (
 )
 DEFAULT_ADULT_DETECT = r"18[|:+]|\bADULT\b|\bXXX\b|FOR ADULTS"
 DEFAULT_REGION_ALLOW = "US,EN"
+# Which provider groups hold PPV/event slots (mined for live events when ppv_events on).
+_PPV_DEFAULT_GROUPS = r"PPV|EVENT|EXCLUSIVE|\bMILB\b|\bNFHS\b"
+# A LIGHT default: only the clearly-junk PPV packages — high-school, per-team-duplicate
+# feeds, mislabeled 24/7, a dead service, and obviously-foreign. Racing, college, minor
+# league etc. are KEPT (they have real audiences); curate those to taste via Dispatcharr's
+# enabled-group toggles or by editing this regex.
+_PPV_SKIP_DEFAULT = r"NFHS|TEAM PPV|24/7|\bFITE\b|\bSTAN\b|VIAPLAY"
 
 # Static defaults the scheduler tick merges over saved settings (kept static so the
 # 30s tick never runs an expensive aggregate — see _SCHED_DEFAULTS use).
@@ -143,6 +153,12 @@ _SCHED_DEFAULTS = {
     "channel_group_name": "Failovarr",
     "merge_group_suffixes": True,
     "locals_by_name": True,
+    "ppv_events": False,
+    "ppv_min_providers": 1,
+    "ppv_groups": _PPV_DEFAULT_GROUPS,
+    "ppv_skip": _PPV_SKIP_DEFAULT,
+    "ppv_number_start": 90000,
+    "ppv_schedule_minutes": 30,
     "skip_stale": True,
     "schedule_time": "",
     "gotify_notify": "off",
@@ -165,6 +181,34 @@ _FOREIGN = {
     "CL", "NL", "AR", "MX", "DE", "FR", "ES", "IT", "PT", "GR", "TR", "RU", "PL",
     "RO", "JP", "CN", "KU", "IL", "IR", "AL", "BG", "PK", "AF", "SO", "BE", "MT",
     "IN", "QC", "LA",
+}
+
+# PPV/event parsing. Provider event streams pack status + matchup + time + package
+# into one name, e.g.
+#   "End | FC Augsburg vs. FC Schalke 04 | all | 30-08-2026 | 08:25 (GMT) | 8K EXCLUSIVE | US: SOCCER PPV 124"
+# trex and strong resell the same upstream, so the matchup text is near-identical
+# across providers → an order-independent matchup key pairs the same live event.
+# (_PPV_DEFAULT_GROUPS is defined up in the defaults section, before _SCHED_DEFAULTS.)
+_PPV_IDLE = re.compile(r"NO EVENT|COMING SOON|OFF ?AIR|PLACEHOLDER", re.I)
+_PPV_DONE = re.compile(r"\b(END|ENDED|FINISHED|FINAL|FULL ?TIME|\bFT\b|OVER|REPLAY|HIGHLIGHTS?)\b", re.I)
+_PPV_LIVE = re.compile(r"\b(LIVE|NEXT|UPCOMING|SOON|START|STARTING|STARTS|NOW|PRE[- ]?GAME)\b", re.I)
+_PPV_VS = re.compile(r"\bVS\.?\b")
+# A "package / slot / quality" trailer segment (e.g. "US: APPLE TV F1 PPV 1",
+# "8K EXCLUSIVE") — never the event's identity, so excluded from title extraction.
+_PPV_PKG = re.compile(r"\bPPV\b|EXCLUSIVE|\b8K\b", re.I)
+# tokens that are decoration/packaging, never part of the event identity
+_PPV_STOP = {
+    "ALL", "US", "USA", "8K", "4K", "UHD", "HD", "FHD", "RAW", "EXCLUSIVE", "EXCLUSIF",
+    "PPV", "VIP", "GMT", "UTC", "EDT", "EST", "PDT", "PST", "CDT", "CST", "MDT", "MST",
+    "AM", "PM", "LIVE", "NEXT", "END", "ENDED", "FINISHED", "FINAL", "SOON", "NOW",
+    "EVENT", "STREAMING", "THE",
+}
+# Date/day/month tokens — ignored when judging whether a fallback segment is a real
+# event title (kept OUT of _PPV_STOP so a team like "Sun" or "May" still matches).
+_PPV_DATE = {
+    "MON", "TUE", "TUES", "WED", "THU", "THUR", "THURS", "FRI", "SAT", "SUN",
+    "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY",
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "SEPT", "OCT", "NOV", "DEC",
 }
 
 # Prefix = everything before the first | or : (may carry a quality tag or spaces,
@@ -329,6 +373,62 @@ def _group_display(gname, drop_suffix=False):
     return "Failovarr"
 
 
+def _ppv_teamtoks(side):
+    return tuple(t for t in re.split(r"[^0-9A-Z]+", side.upper()) if t and t not in _PPV_STOP)
+
+
+def _ppv_parse(name):
+    """Parse a provider PPV/event stream name into
+    {key, status, title} — or None for an idle/unusable slot.
+
+    ``key`` is order-independent so the SAME event on two providers collides:
+      * a "A vs B" matchup -> ``VS:<sorted team-token sides>``
+      * otherwise the normalized descriptive title -> ``T:<tokens>``
+    ``status`` is 'live' | 'done' | 'unknown' (from the leading segment); the caller
+    filters. ``title`` is a clean human label for the channel."""
+    if not name or _PPV_IDLE.search(name) or _is_junk(name):
+        return None
+    segs = [s.strip() for s in re.split(r"[|@]", name) if s.strip()]
+    if not segs:
+        return None
+    first = segs[0]
+    if _PPV_DONE.search(first):
+        status = "done"
+    elif _PPV_LIVE.search(first):
+        status = "live"
+    else:
+        status = "unknown"
+
+    # 1) matchup segment (contains "vs")
+    vs_seg = next((s for s in segs if _PPV_VS.search(_fold(s).upper())), None)
+    if vs_seg:
+        folded = _fold(vs_seg).upper()
+        parts = _PPV_VS.split(folded)
+        if len(parts) >= 2:
+            a, b = _ppv_teamtoks(parts[0]), _ppv_teamtoks(parts[-1])
+            if a and b:
+                canon = "|".join(sorted([" ".join(a), " ".join(b)]))
+                title = re.sub(r"\s+", " ", vs_seg).strip()
+                return {"key": "VS:" + canon, "status": status, "title": title}
+
+    # 2) fallback: the most word-rich non-noise segment = the event title. Date/day/
+    #    month/timezone tokens don't count toward identity (so a pure "Mon 31 Aug
+    #    12:00 EDT" segment isn't mistaken for an event); real names still count.
+    best, best_alpha = None, []
+    for s in segs:
+        if _PPV_PKG.search(s):  # a package/slot/quality trailer, not the event title
+            continue
+        toks = [t for t in re.split(r"[^0-9A-Za-z]+", _fold(s)) if t]
+        alpha = [t for t in toks
+                 if any(c.isalpha() for c in t) and t.upper() not in _PPV_STOP and t.upper() not in _PPV_DATE]
+        if len(alpha) > len(best_alpha):
+            best, best_alpha = s, alpha
+    if best and len(best_alpha) >= 2:  # need a couple of real words to be an identity
+        canon = " ".join(t.upper() for t in best_alpha)
+        return {"key": "T:" + canon, "status": status, "title": re.sub(r"\s+", " ", best).strip()}
+    return None
+
+
 def _now():
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
@@ -399,6 +499,20 @@ class Plugin:
             "description": "Map channels to guide entries by name, then refresh (pulls schedules and applies logos).",
             "button_label": "Match EPG",
             "button_variant": "outline",
+        },
+        {
+            "id": "ppv_preview",
+            "label": "🥊 Preview PPV events (dry-run)",
+            "description": "Show live/upcoming PPV events and which ones pair across providers. Writes nothing.",
+            "button_label": "Preview PPV",
+            "button_variant": "outline",
+        },
+        {
+            "id": "ppv_refresh",
+            "label": "🥊 Refresh PPV events now",
+            "description": "Build/update live PPV event channels with cross-provider failover, and remove ended ones. Requires 'PPV events' enabled in settings.",
+            "button_label": "Refresh PPV",
+            "button_variant": "filled",
         },
         {
             "id": "seed_reset",
@@ -633,6 +747,68 @@ class Plugin:
                 "help_text": "Ignore streams Dispatcharr has flagged stale, so you never attach a dead failover.",
             },
             {
+                "id": "ppv_events",
+                "label": "PPV events with cross-provider failover (experimental)",
+                "type": "boolean",
+                "default": False,
+                "help_text": (
+                    "Surface live/upcoming PPV events (skipped by normal consolidation) "
+                    "as channels, merging the SAME event across providers into one "
+                    "failover channel so it doesn't drop mid-event. Events churn fast — "
+                    "they refresh on their own cadence below and are kept separate from "
+                    "your stable channels. Off by default."
+                ),
+            },
+            {
+                "id": "ppv_skip",
+                "label": "PPV categories to skip (regex)",
+                "type": "string",
+                "default": _PPV_SKIP_DEFAULT,
+                "help_text": (
+                    "PPV packages to leave out. The default is light — only clear junk "
+                    "(high-school, per-team-duplicate feeds, 24/7, a dead service, foreign). "
+                    "Racing, college and minor-league are KEPT. Curate to taste here, or "
+                    "just disable the PPV groups you don't want in Dispatcharr (Failovarr "
+                    "only mines enabled groups)."
+                ),
+            },
+            {
+                "id": "ppv_min_providers",
+                "label": "PPV: minimum providers per event",
+                "type": "number",
+                "default": 1,
+                "min": 1,
+                "help_text": (
+                    "1 = every live event from any provider (marquee events are often on "
+                    "just one provider, so keep this at 1 to see them). 2 = only events on "
+                    "BOTH providers, i.e. cross-provider failover pairs — but those skew "
+                    "toward niche feeds both resell, so 2 hides most premium events."
+                ),
+            },
+            {
+                "id": "ppv_groups",
+                "label": "PPV / event group match (regex)",
+                "type": "string",
+                "default": _PPV_DEFAULT_GROUPS,
+                "help_text": "Which provider groups hold the PPV/event slots to mine for live events.",
+            },
+            {
+                "id": "ppv_schedule_minutes",
+                "label": "PPV refresh interval (minutes)",
+                "type": "number",
+                "default": 30,
+                "min": 5,
+                "help_text": "How often to refresh PPV events when enabled. They rotate hourly, so 15–30 min keeps the list live.",
+            },
+            {
+                "id": "ppv_number_start",
+                "label": "First PPV channel number",
+                "type": "number",
+                "default": 90000,
+                "min": 0,
+                "help_text": "PPV event channels are numbered from here — a high range so they cluster together and never collide with your stable channels.",
+            },
+            {
                 "id": "schedule_time",
                 "label": "Daily reconcile time (HH:MM, UTC — blank = off)",
                 "type": "string",
@@ -700,6 +876,8 @@ class Plugin:
             return self._action_start("seed", dry_run=False, settings=settings)
         if action == "epg_match":
             return self._action_start("epg", dry_run=False, settings=settings)
+        if action in ("ppv_preview", "ppv_refresh"):
+            return self._action_start("ppv", dry_run=(action == "ppv_preview"), settings=settings)
         if action == "stop":
             self._cancel.set()
             return {"status": "ok", "message": "Cancellation requested."}
@@ -727,6 +905,8 @@ class Plugin:
                 report = self._run_job(dry_run=False, settings=dict(settings), mode="seed")
             elif job_kind == "epg":
                 report = self._epg_only(dict(settings))
+            elif job_kind == "ppv":
+                report = self._ppv_job(dry_run=dry_run, settings=dict(settings))
             else:
                 report = self._run_job(dry_run=dry_run, settings=dict(settings), mode="reconcile")
             return {
@@ -1371,6 +1551,137 @@ class Plugin:
                 return hit
         return None
 
+    # ================================================================ PPV events
+    def _gather_ppv(self, providers, cfg):
+        """Walk each provider's PPV/event groups, parse live/upcoming events, and union
+        the SAME event across providers by matchup key. Returns buckets shaped exactly
+        like the stable engine's so `_create_channels`/`_update_channels` are reused."""
+        ppv_re = _compile(cfg["ppv_groups"]) or _compile(_PPV_DEFAULT_GROUPS)
+        skip_re = _compile(cfg.get("ppv_skip"))
+        buckets = {}
+        stats = {"scanned": 0, "idle": 0, "done": 0, "pairs": 0, "single": 0, "skip_category": 0}
+        for idx, acct in enumerate(providers):
+            gid_name = dict(
+                ChannelGroup.objects.filter(
+                    id__in=ChannelGroupM3UAccount.objects.filter(m3u_account=acct, enabled=True)
+                    .values_list("channel_group_id", flat=True)
+                ).values_list("id", "name")
+            )
+            gids = [gid for gid, nm in gid_name.items()
+                    if ppv_re.search(nm or "") and not (skip_re and skip_re.search(nm or ""))]
+            if not gids:
+                continue
+            qs = Stream.objects.filter(m3u_account=acct, channel_group_id__in=gids)
+            if cfg["skip_stale"]:
+                qs = qs.exclude(is_stale=True)
+            for pk, name, gid in qs.values_list("id", "name", "channel_group_id").iterator():
+                stats["scanned"] += 1
+                p = _ppv_parse(name)
+                if p is None:
+                    stats["idle"] += 1
+                    continue
+                if p["status"] == "done":  # live + upcoming only
+                    stats["done"] += 1
+                    continue
+                key = p["key"]
+                b = buckets.get(key)
+                if b is None:
+                    b = buckets[key] = {
+                        "display": (p["title"] or key)[:255],
+                        "is_adult": False,
+                        "epg_key": "",
+                        "callsign": None,
+                        "group": _group_display(gid_name.get(gid, "PPV"), cfg["merge_group_suffixes"]),
+                        "prov": {},
+                    }
+                b["prov"].setdefault(idx, []).append((_quality_rank(name), pk))
+        for b in buckets.values():
+            if len(b["prov"]) > 1:
+                stats["pairs"] += 1
+            else:
+                stats["single"] += 1
+        return buckets, stats
+
+    def _ppv_job(self, dry_run, settings):
+        started = _now()
+        providers = self._resolve_providers(settings)
+        region_allow = self._region_allow(settings)
+        cfg = self._engine_cfg(settings, region_allow)
+        base_prof, adult_prof = self._get_profiles(settings)
+
+        buckets, gstats = self._gather_ppv(providers, cfg)
+        # Keep only events carried by at least ppv_min_providers (2 = cross-provider
+        # failover pairs only; 1 = every live event, "management" mode).
+        minp = cfg["ppv_min_providers"]
+        if minp > 1:
+            buckets = {k: b for k, b in buckets.items() if len(b["prov"]) >= minp}
+        keymap = self._read_ppv_keymap()
+        if keymap:
+            live = set(Channel.objects.filter(id__in=[v["id"] for v in keymap.values()]).values_list("id", flat=True))
+            keymap = {k: v for k, v in keymap.items() if v["id"] in live}
+
+        desired = set(buckets)
+        existing = set(keymap)
+        to_create = sorted(desired - existing)
+        to_prune = sorted(existing - desired)
+        common = desired & existing
+
+        report = {
+            "status": "done", "mode": "ppv", "dry_run": dry_run,
+            "started": _iso(started), "finished": _iso(_now()),
+            "providers": [p.name for p in providers],
+            "stats": {
+                "streams_scanned": gstats["scanned"],
+                "idle_skipped": gstats["idle"],
+                "ended_dropped": gstats["done"],
+                "events_total": len(buckets),
+                "failover_pairs": gstats["pairs"],
+                "single_source": gstats["single"],
+                "events_existing": len(existing),
+                "events_to_create": len(to_create),
+                "events_to_prune": len(to_prune),
+            },
+            "samples": {"pairs": [buckets[k]["display"] for k in desired
+                                  if len(buckets[k]["prov"]) > 1][:20]},
+        }
+
+        if dry_run:
+            report["message"] = (
+                f"DRY-RUN PPV: {len(buckets)} live/upcoming events "
+                f"({gstats['pairs']} cross-provider failover pairs, {gstats['single']} single). "
+                f"Would create {len(to_create)}, prune {len(to_prune)}, keep {len(common)}."
+            )
+            self._write_status(report)
+            self._ws_done(report["message"], dry_run=True)
+            return report
+
+        gcache = {}
+        with transaction.atomic():
+            next_num = self._next_number(cfg["ppv_number_start"], keymap)
+            created = self._create_channels(to_create, buckets, gcache, base_prof, adult_prof, cfg, keymap, next_num)
+            updated = self._update_channels(common, buckets, keymap, base_prof, adult_prof, cfg, gcache) if common else 0
+            pruned = 0
+            if to_prune:
+                ids = [keymap[k]["id"] for k in to_prune]
+                for chunk in _chunks(ids, 2000):
+                    Channel.objects.filter(id__in=chunk).delete()
+                for k in to_prune:
+                    keymap.pop(k, None)
+                pruned = len(ids)
+        self._write_ppv_keymap(keymap)
+
+        report["stats"].update({"created": created, "updated": updated, "pruned": pruned})
+        report["finished"] = _iso(_now())
+        report["message"] = (
+            f"PPV: {created} events added, {updated} updated, {pruned} ended/removed "
+            f"({len(buckets)} live now: {gstats['pairs']} failover pairs, {gstats['single']} single)."
+        )
+        self._write_status(report)
+        logger.info("[Failovarr] %s", report["message"])
+        self._ws_done(report["message"])
+        send_websocket_update("updates", "update", {"type": "channels_refresh"})
+        return report
+
     # ----------------------------------------------------------- providers/cfg
     def _resolve_providers(self, settings):
         by_name = {}
@@ -1420,6 +1731,12 @@ class Plugin:
             "group_name": (settings.get("channel_group_name") or "Failovarr").strip() or "Failovarr",
             "merge_group_suffixes": bool(settings.get("merge_group_suffixes", True)),
             "locals_by_name": bool(settings.get("locals_by_name", True)),
+            "ppv_events": bool(settings.get("ppv_events", False)),
+            "ppv_min_providers": max(1, int(settings.get("ppv_min_providers", 1) or 1)),
+            "ppv_groups": settings.get("ppv_groups", _PPV_DEFAULT_GROUPS),
+            "ppv_skip": settings.get("ppv_skip", _PPV_SKIP_DEFAULT),
+            "ppv_number_start": int(settings.get("ppv_number_start", 90000) or 90000),
+            "ppv_schedule_minutes": int(settings.get("ppv_schedule_minutes", 30) or 30),
         }
 
     # ----------------------------------------------------------- profiles/group
@@ -1435,10 +1752,13 @@ class Plugin:
 
     def _owned_channel_ids(self, base_prof, adult_prof):
         pids = {base_prof.id, adult_prof.id}
-        return set(
+        ids = set(
             ChannelProfileMembership.objects.filter(channel_profile_id__in=pids)
             .values_list("channel_id", flat=True)
         )
+        # Exclude PPV-event channels: they live in the same profiles but churn on
+        # their own cadence, so they must not drive the stable set's health/seed math.
+        return ids - {v["id"] for v in self._read_ppv_keymap().values()}
 
     def _get_group(self, name):
         group, _ = ChannelGroup.objects.get_or_create(name=name)
@@ -1465,6 +1785,22 @@ class Plugin:
             os.replace(tmp, KEYMAP_FILE)
         except Exception:
             logger.exception("[Failovarr] could not write keymap")
+
+    def _read_ppv_keymap(self):
+        try:
+            with open(PPV_KEYMAP_FILE, "r", encoding="utf-8") as fh:
+                return json.load(fh) or {}
+        except Exception:
+            return {}
+
+    def _write_ppv_keymap(self, keymap):
+        try:
+            tmp = PPV_KEYMAP_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(keymap, fh)
+            os.replace(tmp, PPV_KEYMAP_FILE)
+        except Exception:
+            logger.exception("[Failovarr] could not write ppv keymap")
 
     # ----------------------------------------------------------- backups
     def _backup(self, owned_ids, keymap):
@@ -1649,6 +1985,8 @@ class Plugin:
         if not self._plugin_enabled():
             return
         cfg = self._scheduled_settings()
+        # PPV events run on their own fast cadence, independent of the daily reconcile.
+        self._ppv_tick(cfg)
         target = self._parse_hhmm(cfg.get("schedule_time"))
         if not target:
             return
@@ -1700,6 +2038,35 @@ class Plugin:
             close_old_connections()
             self._release_lock()
             self._notify_gotify(cfg, ok, message, changed)
+
+    def _ppv_tick(self, cfg):
+        """Frequent PPV-event refresh (its own cadence, shares the run lock)."""
+        if not bool(cfg.get("ppv_events", False)):
+            return
+        interval = max(5, int(cfg.get("ppv_schedule_minutes", 30) or 30)) * 60
+        marker = os.path.join(SCHED_DIR, "ppv_last.ts")
+        last = self._read_ts(marker)
+        if last and (time.time() - last) < interval:
+            return
+        if not self._acquire_lock():
+            return
+        try:
+            _atomic_write(marker, str(time.time()))
+            self._cancel.clear()
+            report = self._ppv_job(dry_run=False, settings=cfg)
+            logger.info("[Failovarr] scheduled PPV refresh: %s", (report or {}).get("message", "?"))
+        except Exception:
+            logger.exception("failovarr ppv tick failed")
+        finally:
+            close_old_connections()
+            self._release_lock()
+
+    def _read_ts(self, path):
+        try:
+            with open(path) as fh:
+                return float(fh.read().strip())
+        except Exception:
+            return None
 
     def _scheduled_settings(self):
         from apps.plugins.models import PluginConfig

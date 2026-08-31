@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.2.0
+
+**PPV / live-event failover (experimental, opt-in).** The headline feature: surface
+live PPV events — normally skipped — as channels, merging the SAME event across
+providers into one failover channel so it doesn't drop mid-event.
+
+- Parses provider event names into an order-independent key (a `A vs B` matchup, or a
+  normalized title for races/single events like `ITALY: RACE`), so trex and strong —
+  which resell the same upstream with near-identical names — pair on the same event.
+- Idle (`NO EVENT`) slots and finished events are filtered; junk dividers rejected.
+- **Kept entirely separate from your stable channels:** its own keymap, its own
+  channel-number range (`ppv_number_start`, default 90000), and excluded from the
+  stable set's health/seed accounting — PPV churn can never disturb the main lineup.
+- **Light default filter:** a `ppv_skip` list drops only clear junk (high-school,
+  per-team-duplicate feeds, 24/7, a dead service, obviously-foreign) — racing, college
+  and minor-league are kept, since they have real audiences. Also respects Dispatcharr's
+  enabled-group toggles, so you can curate at either layer to taste. `ppv_min_providers`
+  (default 1) can restrict to cross-provider pairs only.
+- **Own fast cadence:** refreshes every `ppv_schedule_minutes` (default 30) so live
+  events appear/disappear promptly, independent of the daily reconcile.
+- New actions: **Preview PPV events** (dry-run) and **Refresh PPV events now**.
+- Off by default — enable **PPV events** in settings to try it.
+
 ## v0.1.9
 
 - **Auto-names refresh when the channel changes — manual renames respected.** When a

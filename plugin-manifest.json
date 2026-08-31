@@ -3,11 +3,20 @@
     "slug": "failovarr",
     "name": "Failovarr",
     "latest": {
-      "version": "0.0.0",
-      "url": "",
-      "sha256": "",
-      "size": 0
+      "version": "0.1.2",
+      "url": "v0.1.2/failovarr-0.1.2.zip",
+      "sha256": "c4c5ee0a1c0fae6caf67b668cc1a8c6867b8ac7f181ead2e187986466ae98d65",
+      "size": 1257463
     },
-    "versions": []
-  }
+    "versions": [
+      {
+        "version": "0.1.2",
+        "url": "v0.1.2/failovarr-0.1.2.zip",
+        "sha256": "c4c5ee0a1c0fae6caf67b668cc1a8c6867b8ac7f181ead2e187986466ae98d65",
+        "size": 1257463,
+        "min_dispatcharr_version": "v0.20.0"
+      }
+    ]
+  },
+  "signature": "-----BEGIN PGP SIGNATURE-----\n\niHUEABYKAB0WIQTbTK/Tr1REt41RnZhi5vxxPOMnfgUCapXHCwAKCRBi5vxxPOMn\nfkKeAQDNbO6SEtcuQFnNpGpGM+BVmdaC4MzlASco4vmH7WhYBQEA3UjN4F/7kaT4\nuzuVyrJwjLeDuFd4aQynQid4Pmc8pAU=\n=p8Y0\n-----END PGP SIGNATURE-----"
 }

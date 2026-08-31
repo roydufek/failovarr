@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -142,6 +142,7 @@ _SCHED_DEFAULTS = {
     "channel_number_start": 1,
     "channel_group_name": "Failovarr",
     "merge_group_suffixes": True,
+    "locals_by_name": True,
     "skip_stale": True,
     "schedule_time": "",
     "gotify_notify": "off",
@@ -154,6 +155,8 @@ _SCHED_DEFAULTS = {
 _QUALITY = {
     "4K", "UHD", "FHD", "HD", "SD", "HQ", "LQ", "RAW", "H265", "H264", "HEVC",
     "AVC", "VIP", "FPS", "60FPS", "50FPS", "DOLBY", "ATMOS", "VISION", "DV", "HDR",
+    # resolution tokens (some providers name a group purely by resolution)
+    "2160P", "2160", "3840P", "3840", "1080P", "1080", "720P", "720", "480P",
 }
 
 # Foreign COUNTRY prefixes to filter (NOT languages — US-market channels are kept
@@ -312,7 +315,15 @@ def _group_display(gname, drop_suffix=False):
     if drop_suffix:
         while len(kept) > 1 and kept[-1].upper() in _GENERIC_GROUP_SUFFIX:
             kept.pop()
-    return " ".join(kept).strip() or "Failovarr"
+    name = " ".join(kept).strip()
+    if name:
+        return name
+    # Nothing left = a group named purely by quality/resolution (e.g. "4K| UHD 3840P").
+    # Give it a clean quality label instead of dumping it in the fallback bucket.
+    up = _fold(gname or "").upper()
+    if any(t in up for t in ("4K", "UHD", "2160", "3840")):
+        return "4K"
+    return "Failovarr"
 
 
 def _now():
@@ -598,6 +609,20 @@ class Plugin:
                 ),
             },
             {
+                "id": "locals_by_name",
+                "label": "Detect local stations by name (merge affiliates across packages)",
+                "type": "boolean",
+                "default": True,
+                "help_text": (
+                    "Normally locals are matched by callsign only inside the "
+                    "ABC/NBC/CBS/FOX network groups. With this on, a channel whose NAME "
+                    "carries a network + callsign is treated as that local no matter "
+                    "which group it's in — so the same affiliate packaged twice (e.g. an "
+                    "'ABC NETWORK' feed and a 'DirecTV city' feed of WSB Atlanta) merges "
+                    "into one channel by callsign. Off = groups-only detection."
+                ),
+            },
+            {
                 "id": "skip_stale",
                 "label": "Skip dead/stale streams",
                 "type": "boolean",
@@ -619,10 +644,15 @@ class Plugin:
                 "options": [
                     {"value": "off", "label": "Off"},
                     {"value": "on_failure", "label": "On failure only"},
+                    {"value": "on_change", "label": "On change (added/pruned/updated) or failure"},
                     {"value": "on_completion", "label": "On every completion"},
                 ],
                 "default": "off",
-                "help_text": "Notify a Gotify endpoint after the daily scheduled run.",
+                "help_text": (
+                    "Notify a Gotify endpoint after the daily scheduled run. 'On change' "
+                    "pings you only when the run actually added, pruned or re-grouped "
+                    "channels (e.g. a provider added a new group) — or if it failed."
+                ),
             },
             {
                 "id": "gotify_server_url",
@@ -982,10 +1012,16 @@ class Plugin:
 
                 is_adult = bool(s_adult) or bool(adult_re and adult_re.search(gname))
 
-                # Local station? key on callsign (network + callsign).
+                # Local station? key on callsign (network + callsign). Detect the
+                # network from the GROUP (ABC/NBC/CBS/FOX network groups) and — when
+                # locals_by_name is on — from the channel NAME too, so the same
+                # affiliate packaged under a different group (e.g. a 'DirecTV city'
+                # feed) still merges by callsign.
                 key = None
                 callsign = None
                 net = _local_network(gname)
+                if not net and cfg["locals_by_name"]:
+                    net = _local_network(name)
                 if net:
                     callsign = _callsign(name)
                     if callsign:
@@ -1347,6 +1383,7 @@ class Plugin:
             "number_start": int(settings.get("channel_number_start", 1) or 0),
             "group_name": (settings.get("channel_group_name") or "Failovarr").strip() or "Failovarr",
             "merge_group_suffixes": bool(settings.get("merge_group_suffixes", True)),
+            "locals_by_name": bool(settings.get("locals_by_name", True)),
         }
 
     # ----------------------------------------------------------- profiles/group
@@ -1536,12 +1573,14 @@ class Plugin:
         except Exception:
             logger.warning("[Failovarr] gotify notify failed", exc_info=True)
 
-    def _notify_gotify(self, settings, ok, message):
+    def _notify_gotify(self, settings, ok, message, changed=None):
         mode = (settings.get("gotify_notify") or "off").strip()
         if mode == "off":
             return
         if mode == "on_failure" and ok:
             return
+        if mode == "on_change" and ok and changed == 0:
+            return  # succeeded with nothing to do — stay quiet
         title = "Failovarr ✅" if ok else "Failovarr ❌ FAILED"
         self._gotify_send(settings, title, message, 3 if ok else 7)
 
@@ -1605,11 +1644,14 @@ class Plugin:
         self._cancel.clear()
         ok = False
         message = ""
+        changed = None
         try:
             logger.info("[Failovarr] scheduled reconcile firing (target %02d:%02d UTC)", *target)
             report = self._run_job(dry_run=False, settings=cfg, mode="reconcile")
             ok = bool(report and report.get("status") == "done")
             message = (report or {}).get("message", "no report")
+            st = (report or {}).get("stats", {}) or {}
+            changed = (st.get("created", 0) or 0) + (st.get("updated", 0) or 0) + (st.get("pruned", 0) or 0)
             if ok:
                 _touch(success_marker)
                 self._cleanup_markers()
@@ -1620,7 +1662,7 @@ class Plugin:
         finally:
             close_old_connections()
             self._release_lock()
-            self._notify_gotify(cfg, ok, message)
+            self._notify_gotify(cfg, ok, message, changed)
 
     def _scheduled_settings(self):
         from apps.plugins.models import PluginConfig

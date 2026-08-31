@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.6
+
+- **Clean 4K group names.** Groups a provider names purely by resolution (e.g.
+  `4K| UHD 3840P`) now become a tidy `4K` category instead of a stray `3840P` token.
+- **Detect locals by name** (`locals_by_name`, default on). A channel whose name
+  carries a network + callsign is treated as that local regardless of its group, so
+  the same affiliate packaged under different groups (e.g. an `ABC NETWORK` feed and a
+  `DirecTV city` feed of WSB Atlanta) merges into one channel by callsign.
+- **Notify on change** (`gotify_notify` → "On change"). Pings you after a scheduled run
+  only when it actually added, pruned or re-grouped channels — e.g. a provider added a
+  new group — or if it failed. Quiet on no-op runs.
+
 ## v0.1.5
 
 - **Tidy group names toggle** (`merge_group_suffixes`, default on). Drops a trailing

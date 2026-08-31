@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -141,6 +141,7 @@ _SCHED_DEFAULTS = {
     "respect_manual_epg": True,
     "channel_number_start": 1,
     "channel_group_name": "Failovarr",
+    "merge_group_suffixes": True,
     "skip_stale": True,
     "schedule_time": "",
     "gotify_notify": "off",
@@ -284,12 +285,19 @@ def _display_name(name, region_allow):
     return s or (name or "").strip()
 
 
-def _group_display(gname):
+# Generic trailing words dropped from group labels when merge_group_suffixes is on,
+# so providers that name the same category differently ("ABC NETWORK" vs "ABC") merge.
+_GENERIC_GROUP_SUFFIX = {"NETWORK", "NETWORKS", "CHANNEL", "CHANNELS", "TV"}
+
+
+def _group_display(gname, drop_suffix=False):
     """Clean a provider group name into a channel-group label for the IPTV client:
     strip ANY leading prefix (``US|``/``US:``/``18|``/``MU|`` …) so trex's ``US| PRIME``
     and strong's ``US: PRIME`` land in ONE group, fold superscripts, collapse spaces.
     Groups are the client's category navigation, so this preserves the provider's own
-    taxonomy (News/Sports/Locals/24-7/…) instead of one giant bucket."""
+    taxonomy (News/Sports/Locals/24-7/…) instead of one giant bucket. With ``drop_suffix``
+    a trailing generic word (NETWORK/CHANNEL/TV) is removed too, merging near-duplicates
+    like ``ABC NETWORK`` (trex) with ``ABC`` (strong)."""
     s = _fold(gname or "").replace("\xa0", " ")
     ptoks, body = _prefix_tokens(s)
     if ptoks:  # strip whatever prefix the group carries (region OR provider tag)
@@ -301,6 +309,9 @@ def _group_display(gname):
         if subs and all(t.upper() in _QUALITY for t in subs):
             continue
         kept.append(w)
+    if drop_suffix:
+        while len(kept) > 1 and kept[-1].upper() in _GENERIC_GROUP_SUFFIX:
+            kept.pop()
     return " ".join(kept).strip() or "Failovarr"
 
 
@@ -570,10 +581,21 @@ class Plugin:
             },
             {
                 "id": "channel_group_name",
-                "label": "Channel group for created channels",
+                "label": "Fallback channel group name",
                 "type": "string",
                 "default": "Failovarr",
-                "help_text": "All created channels are placed in this channel group.",
+                "help_text": "Used only when a channel's provider group can't be determined. Normally each channel takes its primary provider's (cleaned) category group.",
+            },
+            {
+                "id": "merge_group_suffixes",
+                "label": "Tidy group names (drop trailing NETWORK / CHANNEL / TV)",
+                "type": "boolean",
+                "default": True,
+                "help_text": (
+                    "Merge near-duplicate categories that providers name differently — "
+                    "e.g. 'ABC NETWORK' (one provider) and 'ABC' (another) become one "
+                    "'ABC' group. Off keeps each provider's exact group wording."
+                ),
             },
             {
                 "id": "skip_stale",
@@ -983,7 +1005,7 @@ class Plugin:
                         "callsign": callsign,
                         # group from the FIRST (highest-priority provider) stream seen
                         # for this key = the primary's category.
-                        "group": _group_display(gname),
+                        "group": _group_display(gname, cfg["merge_group_suffixes"]),
                         "prov": {},
                     }
                 else:
@@ -1324,6 +1346,7 @@ class Plugin:
             "respect_manual_epg": bool(settings.get("respect_manual_epg", True)),
             "number_start": int(settings.get("channel_number_start", 1) or 0),
             "group_name": (settings.get("channel_group_name") or "Failovarr").strip() or "Failovarr",
+            "merge_group_suffixes": bool(settings.get("merge_group_suffixes", True)),
         }
 
     # ----------------------------------------------------------- profiles/group

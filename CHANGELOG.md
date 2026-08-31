@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.5
+
+- **Tidy group names toggle** (`merge_group_suffixes`, default on). Drops a trailing
+  generic word (NETWORK / CHANNEL / TV) from group labels, so categories that providers
+  name differently merge — e.g. one provider's `ABC NETWORK` and another's `ABC` become
+  a single `ABC` group; `NBC NETWORK` → `NBC`, etc. Turn off to keep each provider's
+  exact wording.
+
 ## v0.1.4
 
 - **Per-category channel groups.** Each consolidated channel now takes the channel

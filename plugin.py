@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -210,6 +210,9 @@ def _consolidation_key(name, region_allow, drop_quality):
     ptoks, body = _prefix_tokens(s)
     if ptoks and ptoks[0] in region_allow:
         s = body  # region prefix stripped; a non-region prefix (GO/PRIME) stays in
+    # Preserve a "+" as its own token so a "+" brand stays DISTINCT from the base
+    # channel (AMC vs AMC+, Paramount vs Paramount+) instead of collapsing together.
+    s = s.replace("+", " PLUS ")
     toks = _tokens(s)
     if drop_quality:
         toks = [t for t in toks if t not in _QUALITY]
@@ -1243,50 +1246,53 @@ class Plugin:
         self._ws_done(report["message"])
         return report
 
-    def _epg_source(self):
-        """The EPG source with the most real (non-dummy) entries."""
+    def _all_epg_sources(self):
+        """Every EPG source that has real (non-dummy) entries, most-entries first.
+        Matching across ALL sources means adding a second guide (e.g. a US-locals
+        XMLTV) lifts coverage automatically — no code change needed."""
         from apps.epg.models import EPGSource, EPGData
-        best, best_n = None, -1
+        rows = []
         for src in EPGSource.objects.all():
             n = EPGData.objects.filter(epg_source=src).exclude(tvg_id__startswith="dummy").count()
-            if n > best_n:
-                best, best_n = src, n
-        return best
+            if n > 0:
+                rows.append((n, src))
+        rows.sort(key=lambda r: -r[0])
+        return [src for _n, src in rows]
 
-    def _build_epg_index(self, source):
-        """name-key -> (epg_data_id, tvg_id). Real entries only; prefer .us on collision."""
+    def _build_epg_index(self, sources):
+        """name-key -> (epg_data_id, tvg_id, source_id). Real entries only. On a key
+        collision prefer a ``.us`` id, then the higher-priority (more-entries) source
+        — which is iterated first, so it wins ties naturally."""
         from apps.epg.models import EPGData
         index = {}
-        for eid, tvg_id, ename in (
-            EPGData.objects.filter(epg_source=source)
-            .exclude(tvg_id__startswith="dummy")
-            .values_list("id", "tvg_id", "name").iterator()
-        ):
-            key = _epg_key(ename)
-            if not key:
-                continue
-            prev = index.get(key)
-            if prev is None:
-                index[key] = (eid, tvg_id)
-            elif str(tvg_id or "").lower().endswith(".us") and not str(prev[1] or "").lower().endswith(".us"):
-                index[key] = (eid, tvg_id)
+        for src in sources:  # best source first
+            for eid, tvg_id, ename in (
+                EPGData.objects.filter(epg_source=src)
+                .exclude(tvg_id__startswith="dummy")
+                .values_list("id", "tvg_id", "name").iterator()
+            ):
+                key = _epg_key(ename)
+                if not key:
+                    continue
+                prev = index.get(key)
+                if prev is None:
+                    index[key] = (eid, tvg_id, src.id)
+                elif str(tvg_id or "").lower().endswith(".us") and not str(prev[1] or "").lower().endswith(".us"):
+                    index[key] = (eid, tvg_id, src.id)
         return index
 
     def _epg_match(self, buckets, keymap, settings, cfg):
-        source = self._epg_source()
-        if source is None:
+        sources = self._all_epg_sources()
+        if not sources:
             return {"matched": 0, "message": "no EPG source found"}
-        index = self._build_epg_index(source)
+        index = self._build_epg_index(sources)
         respect_manual = cfg["respect_manual_epg"]
 
         ch_ids = [keymap[k]["id"] for k in buckets if k in keymap]
-        already = dict(
-            Channel.objects.filter(id__in=ch_ids)
-            .values_list("id", "epg_data_id")
-        )
+        already = dict(Channel.objects.filter(id__in=ch_ids).values_list("id", "epg_data_id"))
 
         updates = []
-        matched = 0
+        matched_source_ids = set()
         for k, b in buckets.items():
             v = keymap.get(k)
             if not v:
@@ -1294,46 +1300,56 @@ class Plugin:
             ch_id = v["id"]
             if respect_manual and already.get(ch_id):
                 continue
-            eid_tvg = self._lookup_epg(b, index)
-            if not eid_tvg:
+            hit = self._lookup_epg(b, index)
+            if not hit:
                 continue
-            eid, tvg = eid_tvg
+            eid, tvg, sid = hit
             updates.append((ch_id, eid, tvg))
-            matched += 1
+            matched_source_ids.add(sid)
 
         for ch_id, eid, tvg in updates:
             Channel.objects.filter(id=ch_id).update(epg_data_id=eid, tvg_id=tvg or "")
 
-        refreshed = False
+        refreshed = []
         if updates:
             try:
                 from apps.epg.tasks import refresh_epg_data
-                refresh_epg_data(source.id)
-                refreshed = True
+                for sid in matched_source_ids:
+                    refresh_epg_data(sid)
+                    refreshed.append(sid)
             except Exception:
                 logger.warning("[Failovarr] refresh_epg_data failed", exc_info=True)
 
-        return {"matched": matched, "source": source.name, "refresh_triggered": refreshed}
+        return {
+            "matched": len(updates),
+            "sources": [s.name for s in sources],
+            "refresh_triggered": bool(refreshed),
+        }
 
     def _lookup_epg(self, bucket, index):
-        # 1) EPG-key exact
-        hit = index.get(bucket["epg_key"])
-        if hit:
-            return hit
-        # 2) suffix drop (NETWORK / CHANNEL / TV) + tiny alias table
-        toks = bucket["epg_key"].split()
+        """Deterministic layered lookup. Returns (eid, tvg, source_id) or None. Every
+        candidate is an EXACT index hit — no fuzzy scoring, so no confident-but-wrong
+        guides."""
+        ek = bucket["epg_key"]
+        toks = ek.split()
+        cands = [ek]
+        # timeshift feed -> base guide (East/West/Pacific share the same schedule)
+        t = toks[:]
+        while len(t) > 1 and t[-1] in _EPG_TIMESHIFT:
+            t = t[:-1]
+        if t and " ".join(t) != ek:
+            cands.append(" ".join(t))
+        # drop a trailing generic word
         if len(toks) > 1 and toks[-1] in ("NETWORK", "CHANNEL", "TV"):
-            hit = index.get(" ".join(toks[:-1]))
-            if hit:
-                return hit
-        alias = _EPG_ALIAS.get(bucket["epg_key"])
-        if alias:
-            hit = index.get(alias)
-            if hit:
-                return hit
-        # 3) callsign for locals
+            cands.append(" ".join(toks[:-1]))
+        # tiny hand-verified alias table
+        if ek in _EPG_ALIAS:
+            cands.append(_EPG_ALIAS[ek])
+        # callsign for locals
         if bucket.get("callsign"):
-            hit = index.get(bucket["callsign"])
+            cands.append(bucket["callsign"])
+        for c in cands:
+            hit = index.get(c)
             if hit:
                 return hit
         return None
@@ -1550,7 +1566,8 @@ class Plugin:
             )
         e = data.get("epg")
         if e:
-            lines.append(f"epg: {e.get('matched','?')} mapped (source {e.get('source','?')})")
+            srcs = e.get("sources") or ([e.get("source")] if e.get("source") else [])
+            lines.append(f"epg: {e.get('matched','?')} mapped (sources: {', '.join(srcs) or '?'})")
         h = data.get("health")
         if h:
             flag = " ⚠️ COLLAPSE" if h.get("cliff") else ""
@@ -1719,6 +1736,10 @@ class Plugin:
         except Exception:
             pass
 
+
+# Trailing timeshift tokens: an East/West/Pacific feed shares the base channel's
+# guide (schedule offset only), so falling back to the base key is safe/deterministic.
+_EPG_TIMESHIFT = {"EAST", "WEST", "PACIFIC"}
 
 # ----------------------------------------------------------------- tiny alias table
 # Deterministic EPG aliases (channel key -> myepg.top name key). Grown over time.

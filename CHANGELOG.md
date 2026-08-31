@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.8
+
+- **`+` brands stay distinct.** `AMC` and `AMC+` (and `Paramount`/`Paramount+`, etc.)
+  are no longer collapsed into one channel — a trailing `+` is preserved in the
+  matching key.
+- **EPG matches across all sources.** Guide matching now uses every EPG source that
+  has real entries, not just the largest — so adding a second guide (e.g. a US-locals
+  XMLTV) raises coverage with no code change, and each involved source is refreshed.
+- **Timeshift feeds share the base guide.** An `East`/`West`/`Pacific` feed falls back
+  to the base channel's guide (e.g. `CINEMAX EAST` → `CINEMAX`) — a safe, deterministic
+  match (same schedule, offset only), never fuzzy.
+
 ## v0.1.7
 
 - **Locals group under their network.** A local station now lands in its network

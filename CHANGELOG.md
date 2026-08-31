@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.3
+
+Scheduler hardening (before enabling the daily reconcile):
+
+- **Never runs while the plugin is disabled.** The scheduler tick now gates on the
+  plugin's enabled state, so a disabled plugin can't keep firing the daily run or its
+  notifications.
+- **Hard cap of 3 attempts per day.** On failure the schedule retries a couple of
+  times (spaced by the cooldown) then gives up until the next day — no indefinite
+  15-minute retry loop and no notification spam. A success still stops further
+  attempts for the day.
+
 ## v0.1.0
 
 Initial release.

@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -111,6 +111,7 @@ HEALTH_DROP_FRAC = 0.5     # current <= 50% of baseline = a collapse
 SCHED_TICK_SECS = 30
 SCHED_WINDOW_SECS = 6 * 3600
 SCHED_COOLDOWN_SECS = 15 * 60
+MAX_DAILY_ATTEMPTS = 3        # hard cap on scheduled runs per day (stops retry/notify spam)
 LOCK_STALE_SECS = 30 * 60
 BACKUP_KEEP = 7
 
@@ -1494,6 +1495,12 @@ class Plugin:
 
     def _scheduler_tick(self):
         close_old_connections()
+        # NEVER run the schedule while the plugin is disabled. The scheduler thread
+        # keeps ticking (it can't reliably be torn down on disable), so the gate has
+        # to live here — otherwise a disabled plugin would keep firing the daily run
+        # and its notifications.
+        if not self._plugin_enabled():
+            return
         cfg = self._scheduled_settings()
         target = self._parse_hhmm(cfg.get("schedule_time"))
         if not target:
@@ -1503,13 +1510,24 @@ class Plugin:
         target_dt = target_today if target_today <= now else target_today - datetime.timedelta(days=1)
         if (now - target_dt).total_seconds() > SCHED_WINDOW_SECS:
             return
-        success_marker = os.path.join(SCHED_DIR, f"success-{target_dt.strftime('%Y%m%d')}.marker")
+        datestr = target_dt.strftime("%Y%m%d")
+        success_marker = os.path.join(SCHED_DIR, f"success-{datestr}.marker")
         if os.path.exists(success_marker):
             return
-        last = self._read_attempt()
-        if last and (time.time() - last) < SCHED_COOLDOWN_SECS:
+        # Hard cap: at most MAX_DAILY_ATTEMPTS runs per target day, spaced by the
+        # cooldown. On failure it retries a couple of times then GIVES UP for the day
+        # (no indefinite 15-min retry, no notification spam). A success writes the
+        # marker above and stops further attempts regardless.
+        att = self._read_attempt()
+        if att.get("date") != datestr:
+            att = {"date": datestr, "count": 0, "last": 0.0}
+        if att.get("count", 0) >= MAX_DAILY_ATTEMPTS:
             return
-        self._write_attempt(time.time())
+        if att.get("last") and (time.time() - att["last"]) < SCHED_COOLDOWN_SECS:
+            return
+        att["count"] = att.get("count", 0) + 1
+        att["last"] = time.time()
+        self._write_attempt(att)
 
         if not self._acquire_lock():
             return
@@ -1557,12 +1575,23 @@ class Plugin:
     def _read_attempt(self):
         try:
             with open(ATTEMPT_FILE, "r") as fh:
-                return float(fh.read().strip())
+                return json.load(fh) or {}
         except Exception:
-            return None
+            return {}
 
-    def _write_attempt(self, ts):
-        _atomic_write(ATTEMPT_FILE, str(ts))
+    def _write_attempt(self, data):
+        _atomic_write(ATTEMPT_FILE, json.dumps(data))
+
+    def _plugin_enabled(self):
+        """Is this plugin currently enabled? Fail CLOSED (treat unknown as disabled)
+        so the schedule never fires for a disabled/unregistered plugin."""
+        try:
+            from apps.plugins.models import PluginConfig
+            row = PluginConfig.objects.filter(key=PLUGIN_KEY).values("enabled").first()
+            return bool(row and row["enabled"])
+        except Exception:
+            logger.debug("could not read plugin enabled state", exc_info=True)
+            return False
 
     def _cleanup_markers(self):
         try:

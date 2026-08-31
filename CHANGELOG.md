@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.4
+
+- **Per-category channel groups.** Each consolidated channel now takes the channel
+  group of its primary stream (cleaned: the `US|`/`US:` prefix stripped so trex and
+  strong categories merge, superscripts folded), instead of everything landing in one
+  flat "Failovarr" group. Restores the provider's category navigation
+  (News/Sports/Locals/24-7/…) in the IPTV client. The reconcile re-groups existing
+  channels in place.
+
 ## v0.1.3
 
 Scheduler hardening (before enabling the daily reconcile):

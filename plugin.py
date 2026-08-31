@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -282,6 +282,26 @@ def _display_name(name, region_allow):
         s = body
     s = re.sub(r"\s+", " ", s).strip()
     return s or (name or "").strip()
+
+
+def _group_display(gname):
+    """Clean a provider group name into a channel-group label for the IPTV client:
+    strip ANY leading prefix (``US|``/``US:``/``18|``/``MU|`` …) so trex's ``US| PRIME``
+    and strong's ``US: PRIME`` land in ONE group, fold superscripts, collapse spaces.
+    Groups are the client's category navigation, so this preserves the provider's own
+    taxonomy (News/Sports/Locals/24-7/…) instead of one giant bucket."""
+    s = _fold(gname or "").replace("\xa0", " ")
+    ptoks, body = _prefix_tokens(s)
+    if ptoks:  # strip whatever prefix the group carries (region OR provider tag)
+        s = body
+    # drop pure-quality words (RAW, 60FPS, "HD/RAW", …) — decoration, not a category
+    kept = []
+    for w in s.split():
+        subs = [t for t in re.split(r"[^0-9A-Za-z]+", w) if t]
+        if subs and all(t.upper() in _QUALITY for t in subs):
+            continue
+        kept.append(w)
+    return " ".join(kept).strip() or "Failovarr"
 
 
 def _now():
@@ -812,7 +832,7 @@ class Plugin:
         backup_path = self._backup(owned_before, keymap)
 
         base_prof, adult_prof = self._get_profiles(settings)
-        group = self._get_group(cfg["group_name"])
+        gcache = {}  # cleaned group name -> ChannelGroup (built lazily)
 
         with transaction.atomic():
             if mode == "seed" and owned_before:
@@ -829,15 +849,15 @@ class Plugin:
 
             # CREATE new channels.
             created = self._create_channels(
-                to_create, buckets, group, base_prof, adult_prof, cfg, keymap, next_num
+                to_create, buckets, gcache, base_prof, adult_prof, cfg, keymap, next_num
             )
             report["stats"]["created"] = created
 
-            # UPDATE existing channels (stream order + membership + adult flag).
+            # UPDATE existing channels (stream order + membership + adult flag + group).
             updated = 0
             if common:
                 updated = self._update_channels(
-                    common, buckets, keymap, base_prof, adult_prof, cfg
+                    common, buckets, keymap, base_prof, adult_prof, cfg, gcache
                 )
             report["stats"]["updated"] = updated
 
@@ -961,6 +981,9 @@ class Plugin:
                         "is_adult": is_adult,
                         "epg_key": _epg_key(name),
                         "callsign": callsign,
+                        # group from the FIRST (highest-priority provider) stream seen
+                        # for this key = the primary's category.
+                        "group": _group_display(gname),
                         "prov": {},
                     }
                 else:
@@ -988,7 +1011,15 @@ class Plugin:
         return out
 
     # -------------------------------------------------------------- create
-    def _create_channels(self, keys, buckets, group, base_prof, adult_prof, cfg, keymap, next_num):
+    def _group_obj(self, name, cache, cfg):
+        name = (name or cfg.get("group_name") or "Failovarr").strip() or "Failovarr"
+        g = cache.get(name)
+        if g is None:
+            g, _ = ChannelGroup.objects.get_or_create(name=name)
+            cache[name] = g
+        return g
+
+    def _create_channels(self, keys, buckets, gcache, base_prof, adult_prof, cfg, keymap, next_num):
         if not keys:
             return 0
         nprov = cfg["nproviders"]
@@ -1004,7 +1035,7 @@ class Plugin:
             rows.append(Channel(
                 name=b["display"][:255] or k,
                 channel_number=float(num),
-                channel_group=group,
+                channel_group=self._group_obj(b.get("group"), gcache, cfg),
                 is_adult=b["is_adult"],
             ))
             order.append((k, b["is_adult"], streams, num))
@@ -1030,8 +1061,8 @@ class Plugin:
         return len(created_objs)
 
     # -------------------------------------------------------------- update
-    def _update_channels(self, keys, buckets, keymap, base_prof, adult_prof, cfg):
-        """Sync stream order, membership and adult flag for existing channels."""
+    def _update_channels(self, keys, buckets, keymap, base_prof, adult_prof, cfg, gcache):
+        """Sync stream order, membership, adult flag and channel group for existing channels."""
         nprov = cfg["nproviders"]
         split = cfg["adult_split"]
         ch_ids = [keymap[k]["id"] for k in keys]
@@ -1044,8 +1075,12 @@ class Plugin:
         ):
             cur.setdefault(ch_id, {})[spk] = (o, cs_id)
 
-        # current adult flags + memberships
-        adult_now = dict(Channel.objects.filter(id__in=ch_ids).values_list("id", "is_adult"))
+        # current adult flag + group per channel
+        info_now = {
+            cid: (ad, gid)
+            for cid, ad, gid in Channel.objects.filter(id__in=ch_ids)
+            .values_list("id", "is_adult", "channel_group_id")
+        }
         mem_now = set()
         for pid, cid in ChannelProfileMembership.objects.filter(
             channel_id__in=ch_ids, channel_profile_id__in=[base_prof.id, adult_prof.id]
@@ -1054,6 +1089,7 @@ class Plugin:
 
         to_create_cs, to_update_cs, to_delete_cs = [], [], []
         adult_flip = []
+        group_flip = []
         mem_add = []
         changed = 0
 
@@ -1079,8 +1115,13 @@ class Plugin:
                     to_delete_cs.append(cs_id)
                     local_changed = True
 
-            if adult_now.get(ch_id) != b["is_adult"]:
+            cur_adult, cur_gid = info_now.get(ch_id, (None, None))
+            if cur_adult != b["is_adult"]:
                 adult_flip.append((ch_id, b["is_adult"]))
+                local_changed = True
+            desired_g = self._group_obj(b.get("group"), gcache, cfg)
+            if cur_gid != desired_g.id:
+                group_flip.append((ch_id, desired_g.id))
                 local_changed = True
 
             if (adult_prof.id, ch_id) not in mem_now:
@@ -1113,6 +1154,13 @@ class Plugin:
                 ChannelProfileMembership.objects.bulk_create(chunk, ignore_conflicts=True)
         for ch_id, val in adult_flip:
             Channel.objects.filter(id=ch_id).update(is_adult=val)
+        if group_flip:
+            by_g = {}
+            for ch_id, gid in group_flip:
+                by_g.setdefault(gid, []).append(ch_id)
+            for gid, ids in by_g.items():
+                for chunk in _chunks(ids, 2000):
+                    Channel.objects.filter(id__in=chunk).update(channel_group_id=gid)
         return changed
 
     # -------------------------------------------------------------- EPG

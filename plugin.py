@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -884,7 +884,10 @@ class Plugin:
                 stats["scanned"] += 1
                 gname = gid_name.get(gid, "") or ""
 
-                if skip_re and (skip_re.search(gname) or skip_re.search(name or "")):
+                # Skip PPV/event GROUPS (by group name only — matching the stream
+                # name too would wrongly drop legit channels that happen to contain
+                # a token like EVENT/8K).
+                if skip_re and skip_re.search(gname):
                     stats["skip_event"] += 1
                     continue
                 if not cfg["include_247"] and _fold(gname).lstrip().upper().startswith(("24/7", "24 7", "247")):
@@ -909,7 +912,6 @@ class Plugin:
                     callsign = _callsign(name)
                     if callsign:
                         key = f"{net} {callsign}"
-                        stats["locals"] += 1
                 if key is None:
                     key = _consolidation_key(name, region_allow, cfg["merge_quality"])
                 if not key:
@@ -936,6 +938,8 @@ class Plugin:
                 stats["single"] += 1
             if b["is_adult"]:
                 stats["adult"] += 1
+            if b.get("callsign"):  # local station keyed on callsign
+                stats["locals"] += 1
         return buckets, stats
 
     def _ordered_streams(self, bucket, nproviders):

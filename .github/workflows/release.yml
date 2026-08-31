@@ -77,8 +77,15 @@ jobs:
             echo "No GPG_PRIVATE_KEY secret set — publishing unsigned."
             exit 0
           fi
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          # Import tolerantly: a benign armor warning (e.g. a mangled paste) makes
+          # gpg exit non-zero and would abort the whole release under `set -e`.
+          # Swallow that, then assert a secret key actually landed and fail loud if not.
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import 2>&1 | sed 's/^/gpg-import: /' || true
           KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
+          if [ -z "$KEYID" ]; then
+            echo "::error::GPG_PRIVATE_KEY imported no secret key. Paste the FULL armored block unchanged: BEGIN line, a blank line, the base64 body, the =checksum, END line — do not delete the blank line."
+            exit 1
+          fi
           sign() {
             f="$1"
             # Canonical bytes = exactly what Dispatcharr recomputes to verify:

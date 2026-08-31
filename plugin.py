@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -162,7 +162,9 @@ _FOREIGN = {
     "IN", "QC", "LA",
 }
 
-_PREFIX_RE = re.compile(r"^\s*([A-Za-z0-9]{1,6})\s*[|:]\s*(.*)$")
+# Prefix = everything before the first | or : (may carry a quality tag or spaces,
+# e.g. "AR 4K:" or "US|"). The leading alpha token is the country/region code.
+_PREFIX_RE = re.compile(r"^\s*([^|:]{1,24})[|:]\s*(.*)$")
 _LOCAL_RE = re.compile(r"\b(ABC|NBC|CBS|FOX)\b")
 _CALL_PAREN = re.compile(r"\(([WK][A-Z0-9]{2,4})\)")
 _CALL_BARE = re.compile(r"\b([WK][A-Z]{2,3})\b")
@@ -181,11 +183,16 @@ def _fold(s):
     return "".join(out)
 
 
-def _split_prefix(s):
+def _prefix_tokens(s):
+    """(prefix_tokens, body) split on the first | or :. prefix_tokens is the list of
+    alnum tokens in the prefix ("AR 4K:" -> (['AR','4K'], body)); ([], s) if none."""
     m = _PREFIX_RE.match(s)
-    if m:
-        return m.group(1).upper(), m.group(2)
-    return None, s
+    if not m:
+        return [], s
+    toks = [t for t in re.split(r"[^0-9A-Za-z]+", m.group(1).upper()) if t]
+    if not toks:
+        return [], s
+    return toks, m.group(2)
 
 
 def _tokens(s):
@@ -195,8 +202,8 @@ def _tokens(s):
 def _consolidation_key(name, region_allow, drop_quality):
     """Group-by key: strip region prefix (US/EN), keep other prefixes, drop quality."""
     s = _fold(name)
-    pfx, body = _split_prefix(s)
-    if pfx is not None and pfx in region_allow:
+    ptoks, body = _prefix_tokens(s)
+    if ptoks and ptoks[0] in region_allow:
         s = body  # region prefix stripped; a non-region prefix (GO/PRIME) stays in
     toks = _tokens(s)
     if drop_quality:
@@ -207,10 +214,10 @@ def _consolidation_key(name, region_allow, drop_quality):
 def _epg_key(name):
     """EPG-lookup key: strip ALL prefixes + quality (myepg.top is keyed by bare names)."""
     s = _fold(name)
-    pfx, body = _split_prefix(s)
-    while pfx is not None:
+    ptoks, body = _prefix_tokens(s)
+    while ptoks:
         s = body
-        pfx, body = _split_prefix(s)
+        ptoks, body = _prefix_tokens(s)
     return " ".join(t for t in _tokens(s) if t not in _QUALITY)
 
 
@@ -226,8 +233,35 @@ def _local_network(group_name):
 
 
 def _country_prefix(name):
-    pfx, _ = _split_prefix(_fold(name))
-    return pfx
+    ptoks, _ = _prefix_tokens(_fold(name))
+    return ptoks[0] if ptoks else None
+
+
+def _is_non_latin(name):
+    """True when the name is predominantly non-ASCII-Latin script (Arabic, Cyrillic,
+    CJK, Hebrew…). Such channels are foreign regardless of any recognized prefix, and
+    their distinctive text is lost by the Latin tokenizer (they'd collapse together)."""
+    s = _fold(name)
+    letters = [c for c in s if c.isalpha()]
+    if not letters:
+        return False
+    non_ascii = sum(1 for c in letters if ord(c) > 127)
+    return non_ascii >= max(2, len(letters) * 0.5)
+
+
+# Quality-tier rank for intra-provider stream ordering (lower is tried first, so a
+# standard HD/FHD feed is the default before a bandwidth-heavy 4K one).
+def _quality_rank(name):
+    toks = set(_tokens(_fold(name)))
+    if "FHD" in toks:
+        return 0
+    if "HD" in toks:
+        return 1
+    if "4K" in toks or "UHD" in toks:
+        return 4
+    if "SD" in toks:
+        return 5
+    return 2
 
 
 def _is_junk(name):
@@ -242,8 +276,8 @@ def _is_junk(name):
 def _display_name(name, region_allow):
     """Human channel name: region prefix stripped, superscripts folded, kept legible."""
     s = _fold(name)
-    pfx, body = _split_prefix(s)
-    if pfx is not None and pfx in region_allow:
+    ptoks, body = _prefix_tokens(s)
+    if ptoks and ptoks[0] in region_allow:
         s = body
     s = re.sub(r"\s+", " ", s).strip()
     return s or (name or "").strip()
@@ -898,7 +932,8 @@ class Plugin:
                     continue
                 if cfg["filter_foreign"]:
                     cp = _country_prefix(name)
-                    if cp in _FOREIGN and not (cfg["keep_us_market"] and cp in region_allow):
+                    protected = cfg["keep_us_market"] and cp in region_allow
+                    if not protected and (cp in _FOREIGN or _is_non_latin(name)):
                         stats["skip_foreign"] += 1
                         continue
 
@@ -929,7 +964,7 @@ class Plugin:
                     }
                 else:
                     b["is_adult"] = b["is_adult"] or is_adult
-                b["prov"].setdefault(idx, []).append(pk)
+                b["prov"].setdefault(idx, []).append((_quality_rank(name), pk))
 
         for b in buckets.values():
             if len(b["prov"]) > 1:
@@ -943,10 +978,11 @@ class Plugin:
         return buckets, stats
 
     def _ordered_streams(self, bucket, nproviders):
-        """Final failover order: provider 0's stream(s) first, then 1, 2, …"""
+        """Final failover order: provider 0 first, then 1, 2, …; within a provider,
+        by quality tier (HD/FHD before 4K) then stream id for determinism."""
         out = []
         for idx in range(nproviders):
-            for pk in sorted(bucket["prov"].get(idx, [])):
+            for _rank, pk in sorted(bucket["prov"].get(idx, [])):
                 out.append(pk)
         return out
 

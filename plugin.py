@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -343,7 +343,9 @@ def _is_junk(name):
     n = _fold(name or "")
     if not re.search(r"[0-9A-Za-z]", n):
         return True
-    if re.search(r"#{3,}", n):  # labelled divider e.g. "##### FOX WISCONSIN #####"
+    # Labelled divider/placeholder, e.g. "##### FOX WISCONSIN #####" or
+    # "## MAX ESPN HD/RAW 60fps ##" — providers bookend section headers with 2+ hashes.
+    if re.search(r"#{2,}", n):
         return True
     return False
 

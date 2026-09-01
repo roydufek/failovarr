@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.5
+
+- **Filter 2-hash divider/placeholder channels.** Providers bookend section headers
+  with two hashes (`## MAX ESPN HD/RAW 60fps ##`), which slipped the junk filter (it
+  only caught 3+). Now caught, so those placeholders no longer become channels.
+
 ## v0.2.4
 
 - **EPG: match local channels by callsign against US-locals guides.** US-locals XMLTV

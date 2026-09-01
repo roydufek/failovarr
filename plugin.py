@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -292,6 +292,14 @@ def _callsign(name):
         if cs not in _CALL_STOP:
             return cs
     return None
+
+
+def _epg_callsign(name):
+    """If an EPG entry name is a bare station callsign (`KCEN-DT`, `WHDC-LD`, `K42HT-D`
+    — the US-locals XMLTV format), return the callsign with the transmission suffix
+    stripped (`KCEN`), so it can be indexed for callsign lookup. Else None."""
+    base = _fold(name or "").strip().upper().split("-")[0].split(" ")[0]
+    return base if re.match(r"^[WK][A-Z0-9]{2,4}$", base) else None
 
 
 def _local_network(group_name):
@@ -1527,6 +1535,12 @@ class Plugin:
                     index[key] = (eid, tvg_id, src.id)
                 elif str(tvg_id or "").lower().endswith(".us") and not str(prev[1] or "").lower().endswith(".us"):
                     index[key] = (eid, tvg_id, src.id)
+                # Also index a bare-callsign name (US-locals guides key by callsign),
+                # so a local channel can match on its callsign alone. Don't overwrite an
+                # existing key (a real named entry wins).
+                cs = _epg_callsign(ename)
+                if cs and cs not in index:
+                    index[cs] = (eid, tvg_id, src.id)
         return index
 
     def _epg_match(self, buckets, keymap, settings, cfg):

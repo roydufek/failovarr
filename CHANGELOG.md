@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.4
+
+- **EPG: match local channels by callsign against US-locals guides.** US-locals XMLTV
+  feeds (e.g. EPGShare's `US_LOCALS`) name every entry by bare station callsign with a
+  transmission suffix (`KCEN-DT`, `WHDC-LD`). Those entries are now also indexed by the
+  bare callsign, so a local channel matches on its callsign alone. Adding a US-locals
+  EPG source in Dispatcharr now fills in a large chunk of local-affiliate guides (and
+  logos) automatically — on one live setup, EPG coverage jumped from 1,404 to 2,173
+  channels (+763 locals) with the source added.
+
 ## v0.2.3
 
 Hardening from a full code-review pass:

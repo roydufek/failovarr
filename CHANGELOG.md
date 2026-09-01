@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.8
+
+- **City-level local affiliates group under their network** (beyond the big four).
+  DirecTV-style `CITY|` local feeds — PBS, CW, Telemundo, MyNetworkTV, and independents —
+  were consolidating and failing over correctly but all landed in one raw provider
+  bucket (`DIREC TV city`) because the locals engine only recognized ABC/NBC/CBS/FOX.
+  They now group under a clean network label (`CW`, `PBS`, `Telemundo`, `MyNetworkTV`,
+  `Univision`, `Independent`) detected from the channel name — the same taxonomy the big
+  four already use. Grouping only: the matching key is unchanged, so this re-groups in
+  place with **no renumbering** and no effect on the failover pairs. Follows the
+  **Detect locals by name** toggle.
+
 ## v0.2.7
 
 - **Merge equivalent group names.** Providers often split the same shelf by

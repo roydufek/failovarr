@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -345,6 +345,39 @@ def _epg_callsign(name):
 def _local_network(group_name):
     m = _LOCAL_RE.search(_fold(group_name or "").upper())
     return m.group(1) if m else None
+
+
+# US broadcast-network brands used to group city-level local affiliates (DirecTV-style
+# "CITY|" feeds) beyond the big four. Token after the CITY prefix -> clean group label.
+# ABC/NBC/CBS/FOX are handled upstream (callsign-keyed via _local_network) so aren't here.
+_CITY_NET_GROUP = {
+    "CW": "CW", "PBS": "PBS",
+    "TMO": "Telemundo", "TEL": "Telemundo", "TELE": "Telemundo", "TELEMUNDO": "Telemundo",
+    "MNT": "MyNetworkTV", "MYTV": "MyNetworkTV", "MY": "MyNetworkTV", "MYNET": "MyNetworkTV",
+    "UNI": "Univision", "UNV": "Univision", "UNIVISION": "Univision",
+    "ION": "ION", "IND": "Independent", "INDIE": "Independent",
+}
+
+
+def _city_local_group(name):
+    """For a DirecTV-style ``CITY|`` local-affiliate feed, return a clean NETWORK group
+    label from the brand token right after the prefix (``CITY| CW KDAF ...`` -> ``CW``),
+    or ``Independent`` for a bare-callsign feed with no network brand
+    (``CITY| KICU SAN FRANCISCO`` -> ``Independent``). ``None`` when it isn't a CITY feed,
+    so normal group handling applies. Grouping only — the channel's matching key is
+    unchanged, so this re-groups in place with no renumbering."""
+    ptoks, body = _prefix_tokens(_fold(name or ""))
+    if not ptoks or ptoks[0] != "CITY":
+        return None
+    toks = _tokens(body)
+    if not toks:
+        return None
+    first = toks[0]
+    if first in _CITY_NET_GROUP:
+        return _CITY_NET_GROUP[first]
+    if re.match(r"^[WK][A-Z0-9]{2,4}$", first):  # bare callsign, no network brand
+        return "Independent"
+    return None
 
 
 def _country_prefix(name):
@@ -1356,6 +1389,16 @@ class Plugin:
                     stats["skip_junk"] += 1
                     continue
 
+                # Group: a big-four local sits under its NETWORK; a DirecTV-style CITY|
+                # affiliate (CW/PBS/Telemundo/MyNetworkTV/Independent…) is grouped under
+                # its network too (name-detected, key unchanged — re-groups in place);
+                # everything else takes its primary stream's cleaned provider category.
+                if local_net:
+                    grp = local_net
+                else:
+                    grp = (cfg["locals_by_name"] and _city_local_group(name)) or \
+                        _group_display(gname, cfg["merge_group_suffixes"], cfg["group_aliases"])
+
                 b = buckets.get(key)
                 if b is None:
                     b = buckets[key] = {
@@ -1363,10 +1406,7 @@ class Plugin:
                         "is_adult": is_adult,
                         "epg_key": _epg_key(name),
                         "callsign": callsign,
-                        # Group: a local sits under its NETWORK (ABC/NBC/CBS/FOX) so
-                        # affiliates from different packages land together; everything
-                        # else takes its primary stream's cleaned provider category.
-                        "group": local_net if local_net else _group_display(gname, cfg["merge_group_suffixes"], cfg["group_aliases"]),
+                        "group": grp,
                         "prov": {},
                     }
                 else:

@@ -204,7 +204,10 @@ After installing, enable Failovarr and configure:
   singular `US| SPORT` shelf lands in the same **SPORTS** group as the plural one; add
   your own pairs, or clear the box to keep every group exactly as each provider names
   it. Only the pairs you list are merged — nothing is guessed.
-- **Detect locals by name** — merge the same affiliate packaged under different groups.
+- **Detect locals by name** — merge the same affiliate packaged under different groups,
+  and file local stations under their network. Beyond ABC/NBC/CBS/FOX, DirecTV-style
+  `CITY|` affiliates are grouped under a clean network label (CW, PBS, Telemundo,
+  MyNetworkTV, Univision, Independent) instead of a raw provider bucket.
 - **Adult split** + **base / +18 profile names** + **adult detection**.
 - **First channel number** · **Fallback channel group name**.
 

@@ -100,11 +100,24 @@ EPG source you've added in Dispatcharr** — then a single refresh pulls schedul
 base guide. It's deterministic (exact matches only — never fuzzy), and it respects
 manually-fixed guides.
 
-> **Coverage tip:** a generic guide like myepg.top covers major cable/national
-> channels well but is thin on US local affiliates and has nothing for 24/7 loops. To
-> raise local coverage, add a second EPG source in Dispatcharr (e.g. a free EPGShare
-> US-locals feed, or Schedules Direct) — Failovarr matches across all sources
-> automatically, no reconfiguration needed.
+> **Coverage tip — US locals.** A generic guide like myepg.top covers major
+> cable/national channels well but is thin on US **local affiliates** (and has nothing
+> for 24/7 loops — those have no schedule). To fill in your locals, add a **US-locals
+> XMLTV** as a second EPG source in Dispatcharr. Failovarr has first-class support for
+> these: US-locals feeds name each entry by station **callsign** (`KCEN-DT`, `WHDC-LD`),
+> and Failovarr matches your local channels by callsign automatically — guide *and*
+> logos, no plugin settings to change (it matches across all your EPG sources at once).
+>
+> A popular free option is **EPGShare**'s US-locals file:
+>
+> ```
+> https://epgshare01.online/epgshare01/epg_ripper_US_LOCALS1.xml.gz
+> ```
+>
+> They also publish `epg_ripper_US2.xml.gz` (national/cable) and `epg_ripper_US_SPORTS1.xml.gz`;
+> EPGShare rotates filenames occasionally, so grab the current ones from
+> <https://epgshare01.online/epgshare01/>. For the most robust US/Canada local coverage,
+> **Schedules Direct** (paid) is the gold standard.
 
 ## PPV / live-event failover
 

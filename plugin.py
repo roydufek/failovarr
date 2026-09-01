@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -252,8 +252,47 @@ def _tokens(s):
     return [t for t in re.split(r"[^0-9A-Za-z]+", s.upper()) if t]
 
 
+_TIER_4K = {"4K", "UHD", "2160", "2160P", "3840", "3840P"}
+_TIER_FHD = {"FHD", "1080", "1080P"}
+_TIER_HD = {"HD", "720", "720P"}
+_TIER_SD = {"SD", "480", "480P"}
+_FPS_TOK = re.compile(r"^(\d{2,3})FPS$")
+_RES_TOK = re.compile(r"^\d{3,4}P$")
+
+
+def _is_quality_token(t):
+    """A resolution/quality/framerate token (dropped from the base key)."""
+    return t in _QUALITY or bool(_FPS_TOK.match(t)) or bool(_RES_TOK.match(t))
+
+
+def _quality_suffix(name):
+    """A CANONICAL quality label for a stream — resolution tier + framerate — so the
+    same real quality matches across providers despite different decoration
+    (`UHD` vs `UHD 3840P` both → `4K`). **HD/FHD (and untagged) are the modern baseline
+    → no suffix**, so a channel labelled `HD` on one sub and untagged on the other still
+    pairs. Only genuinely-different tiers (4K above, SD below) and framerate get a label.
+    Empty when the name is baseline HD."""
+    toks = set(_tokens(_fold(name)))
+    if toks & _TIER_4K:
+        tier = "4K"
+    elif toks & _TIER_SD:
+        tier = "SD"
+    else:
+        tier = ""  # HD / FHD / 720 / 1080 / untagged = assumed-HD baseline
+    fps = ""
+    for t in toks:
+        mt = _FPS_TOK.match(t)
+        if mt:
+            fps = mt.group(1) + "FPS"
+            break
+    return " ".join(p for p in (tier, fps) if p)
+
+
 def _consolidation_key(name, region_allow, drop_quality):
-    """Group-by key: strip region prefix (US/EN), keep other prefixes, drop quality."""
+    """Group-by key: strip region prefix (US/EN), keep other prefixes. With
+    ``drop_quality`` (merge_quality_variants ON) every resolution/framerate variant
+    collapses to one channel; otherwise a canonical tier is appended so HD/4K/fps stay
+    distinct but still pair across providers."""
     s = _fold(name)
     ptoks, body = _prefix_tokens(s)
     if ptoks and ptoks[0] in region_allow:
@@ -261,10 +300,11 @@ def _consolidation_key(name, region_allow, drop_quality):
     # Preserve a "+" as its own token so a "+" brand stays DISTINCT from the base
     # channel (AMC vs AMC+, Paramount vs Paramount+) instead of collapsing together.
     s = s.replace("+", " PLUS ")
-    toks = _tokens(s)
+    base = " ".join(t for t in _tokens(s) if not _is_quality_token(t))
     if drop_quality:
-        toks = [t for t in toks if t not in _QUALITY]
-    return " ".join(toks)
+        return base
+    suf = _quality_suffix(name)
+    return (base + " " + suf).strip() if suf else base
 
 
 def _epg_key(name):
@@ -274,7 +314,7 @@ def _epg_key(name):
     while ptoks:
         s = body
         ptoks, body = _prefix_tokens(s)
-    return " ".join(t for t in _tokens(s) if t not in _QUALITY)
+    return " ".join(t for t in _tokens(s) if not _is_quality_token(t))
 
 
 # Common W/K words that match the bare-callsign shape but are NOT callsigns — so a
@@ -661,10 +701,16 @@ class Plugin:
             },
             {
                 "id": "merge_quality_variants",
-                "label": "Merge quality variants (HD + 4K → one channel)",
+                "label": "Merge quality variants (HD/4K/fps → one channel)",
                 "type": "boolean",
                 "default": True,
-                "help_text": "On: drop quality tags from the key so HD/4K/FHD of the same channel become one (more failover). Off: keep them separate.",
+                "help_text": (
+                    "On: pool every resolution/framerate variant of a channel into one "
+                    "(fewer channels, more failover streams). Off: keep 4K and framerate "
+                    "variants as their OWN channels — HD is treated as the baseline (so an "
+                    "'HD' feed and an untagged feed still pair across providers), while 4K, "
+                    "SD and 60/50/25 fps each get their own cross-provider channel."
+                ),
             },
             {
                 "id": "skip_junk_names",

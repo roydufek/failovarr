@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.6
+
+- **Quality-variant splitting done right (`merge_quality_variants` OFF).** When off, 4K
+  and framerate variants become their own channels instead of pooling into one — but
+  with a **canonical quality tier** so the same tier pairs across providers despite
+  different decoration (`UHD` vs `UHD 3840P` both → `4K`), and **HD is the baseline**
+  (an `HD` feed and an untagged feed still pair, e.g. `ESPN U` ↔ `ESPN U HD`). Result:
+  clean per-quality channels each with a cross-provider failover pair — 4K its own pair,
+  60/50/25 fps their own pickable channels — instead of one channel with a stack of
+  mixed-quality streams. Default stays ON (pool everything, fewer channels).
+
 ## v0.2.5
 
 - **Filter 2-hash divider/placeholder channels.** Providers bookend section headers

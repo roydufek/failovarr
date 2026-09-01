@@ -198,6 +198,12 @@ After installing, enable Failovarr and configure:
 
 **Grouping, locals & profiles**
 - **Tidy group names** — merge `ABC NETWORK` + `ABC`, drop resolution-only names.
+- **Merge equivalent group names** — fold categories that mean the same thing into one
+  guide group. One `FROM = TO` pair per line (or comma-separated), case-insensitive on
+  the left, applied to the cleaned label. Ships with `SPORT = SPORTS` so a provider's
+  singular `US| SPORT` shelf lands in the same **SPORTS** group as the plural one; add
+  your own pairs, or clear the box to keep every group exactly as each provider names
+  it. Only the pairs you list are merged — nothing is guessed.
 - **Detect locals by name** — merge the same affiliate packaged under different groups.
 - **Adult split** + **base / +18 profile names** + **adult detection**.
 - **First channel number** · **Fallback channel group name**.

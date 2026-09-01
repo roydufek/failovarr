@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -404,8 +404,31 @@ def _display_name(name, region_allow):
 # so providers that name the same category differently ("ABC NETWORK" vs "ABC") merge.
 _GENERIC_GROUP_SUFFIX = {"NETWORK", "NETWORKS", "CHANNEL", "CHANNELS", "TV"}
 
+# Default group aliases: providers split the same shelf by singular/plural
+# ("US| SPORT" vs "US| SPORTS"), which becomes two adjacent guide categories after
+# the prefix is stripped. Canonicalize the obvious, universally-safe case. Users add
+# their own pairs via the "Merge equivalent group names" setting.
+_GROUP_ALIAS_DEFAULT = "SPORT = SPORTS"
 
-def _group_display(gname, drop_suffix=False):
+
+def _parse_group_aliases(raw):
+    """Parse a user 'FROM = TO' / 'FROM -> TO' alias list (newline- or comma-separated)
+    into ``{FROM_UPPERCASED: TO_verbatim}``. Deterministic, explicit — merges ONLY the
+    pairs named, never guesses (no generic plural-folding, which would collide
+    News/New, Kids/Kid, Movies/Movie). The lookup is case-insensitive; the TO value's
+    casing is kept verbatim so the user controls the resulting label."""
+    out = {}
+    for line in re.split(r"[\r\n,]+", raw or ""):
+        m = re.match(r"\s*(.+?)\s*(?:=|->|=>|:)\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        frm, to = m.group(1).strip(), m.group(2).strip()
+        if frm and to:
+            out[frm.upper()] = to
+    return out
+
+
+def _group_display(gname, drop_suffix=False, aliases=None):
     """Clean a provider group name into a channel-group label for the IPTV client:
     strip ANY leading prefix (``US|``/``US:``/``18|``/``MU|`` …) so trex's ``US| PRIME``
     and strong's ``US: PRIME`` land in ONE group, fold superscripts, collapse spaces.
@@ -429,12 +452,12 @@ def _group_display(gname, drop_suffix=False):
             kept.pop()
     name = " ".join(kept).strip()
     if name:
-        return name
+        return (aliases or {}).get(name.upper(), name)  # canonicalize named equivalents
     # Nothing left = a group named purely by quality/resolution (e.g. "4K| UHD 3840P").
     # Give it a clean quality label instead of dumping it in the fallback bucket.
     up = _fold(gname or "").upper()
     if any(t in up for t in ("4K", "UHD", "2160", "3840")):
-        return "4K"
+        return (aliases or {}).get("4K", "4K")
     return ""  # let the caller apply the configured fallback group name
 
 
@@ -794,6 +817,20 @@ class Plugin:
                     "Merge near-duplicate categories that providers name differently — "
                     "e.g. 'ABC NETWORK' (one provider) and 'ABC' (another) become one "
                     "'ABC' group. Off keeps each provider's exact group wording."
+                ),
+            },
+            {
+                "id": "group_aliases",
+                "label": "Merge equivalent group names",
+                "type": "string",
+                "default": _GROUP_ALIAS_DEFAULT,
+                "help_text": (
+                    "Fold categories that mean the same thing into one guide group. One "
+                    "'FROM = TO' pair per line (or comma-separated), case-insensitive on "
+                    "the left. Applied to the cleaned label (after the 'US|' prefix is "
+                    "stripped), so 'SPORT = SPORTS' puts a provider's 'US| SPORT' channels "
+                    "into the 'SPORTS' group. Only the pairs you list are merged — nothing "
+                    "is guessed. Clear the box to keep every group exactly as-is."
                 ),
             },
             {
@@ -1329,7 +1366,7 @@ class Plugin:
                         # Group: a local sits under its NETWORK (ABC/NBC/CBS/FOX) so
                         # affiliates from different packages land together; everything
                         # else takes its primary stream's cleaned provider category.
-                        "group": local_net if local_net else _group_display(gname, cfg["merge_group_suffixes"]),
+                        "group": local_net if local_net else _group_display(gname, cfg["merge_group_suffixes"], cfg["group_aliases"]),
                         "prov": {},
                     }
                 else:
@@ -1704,7 +1741,7 @@ class Plugin:
                         "is_adult": False,
                         "epg_key": "",
                         "callsign": None,
-                        "group": _group_display(gid_name.get(gid, "PPV"), cfg["merge_group_suffixes"]),
+                        "group": _group_display(gid_name.get(gid, "PPV"), cfg["merge_group_suffixes"], cfg["group_aliases"]),
                         "prov": {},
                     }
                 b["prov"].setdefault(idx, []).append((_quality_rank(name), pk))
@@ -1854,6 +1891,7 @@ class Plugin:
             "number_start": int(settings.get("channel_number_start", 1) or 0),
             "group_name": (settings.get("channel_group_name") or "Failovarr").strip() or "Failovarr",
             "merge_group_suffixes": bool(settings.get("merge_group_suffixes", True)),
+            "group_aliases": _parse_group_aliases(settings.get("group_aliases", _GROUP_ALIAS_DEFAULT)),
             "locals_by_name": bool(settings.get("locals_by_name", True)),
             "ppv_events": bool(settings.get("ppv_events", False)),
             "ppv_min_providers": max(1, int(settings.get("ppv_min_providers", 1) or 1)),

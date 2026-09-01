@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.7
+
+- **Merge equivalent group names.** Providers often split the same shelf by
+  singular/plural — one labels its category `US| SPORT`, the other `US| SPORTS` —
+  which becomes two adjacent guide groups once the prefix is stripped. A new
+  **Merge equivalent group names** setting folds named categories into one: one
+  `FROM = TO` pair per line (case-insensitive on the left), applied to the cleaned
+  label. Ships with a sane default (`SPORT = SPORTS`) and is fully editable — add your
+  own pairs, or clear the box to keep every group exactly as each provider names it.
+  Deterministic and explicit: only the pairs you list are merged, nothing is guessed
+  (no blind plural-folding, which would wrongly collide News/New, Kids/Kid).
+
 ## v0.2.6
 
 - **Quality-variant splitting done right (`merge_quality_variants` OFF).** When off, 4K

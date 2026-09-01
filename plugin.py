@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -104,18 +104,22 @@ PPV_KEYMAP_FILE = os.path.join(DATA_DIR, "ppv_keymap.json")
 HEALTH_FILE = os.path.join(DATA_DIR, "health.json")
 BACKUP_GLOB = os.path.join(DATA_DIR, "backup_*.json")
 
-# Channel-drop safeguard. If the owned channel count collapses (a provider outage
-# came back empty and channels got wiped, or the providers returned almost nothing
-# this run), skip pruning and fire a high-priority alert instead of deleting.
-HEALTH_MIN_BASELINE = 50   # never alarm below this many channels
-HEALTH_DROP_FRAC = 0.5     # current <= 50% of baseline = a collapse
+# Channel-drop safeguard. If a reconcile's computed diff would prune more than
+# HEALTH_DROP_FRAC of the existing owned channels (a provider outage returning an
+# empty/tiny stream set), skip the pruning and fire a high-priority alert instead.
+HEALTH_MIN_BASELINE = 50   # never alarm below this many existing channels
+HEALTH_DROP_FRAC = 0.5     # would-prune > 50% of existing = a collapse
 
 # Scheduler tuning.
 SCHED_TICK_SECS = 30
 SCHED_WINDOW_SECS = 6 * 3600
 SCHED_COOLDOWN_SECS = 15 * 60
 MAX_DAILY_ATTEMPTS = 3        # hard cap on scheduled runs per day (stops retry/notify spam)
-LOCK_STALE_SECS = 30 * 60
+# A crashed holder is reclaimed IMMEDIATELY via the pid-liveness check; this age-only
+# ceiling is just the backstop for the rare pid-reuse case, set well above any real run
+# (reconciles take seconds; even a seed + EPG refresh is a couple of minutes) so a
+# legitimate long run is never stolen out from under itself.
+LOCK_STALE_SECS = 60 * 60
 BACKUP_KEEP = 7
 
 # ---------------------------------------------------------------- defaults
@@ -273,10 +277,21 @@ def _epg_key(name):
     return " ".join(t for t in _tokens(s) if t not in _QUALITY)
 
 
+# Common W/K words that match the bare-callsign shape but are NOT callsigns — so a
+# national feed like "NBC WEST" or "ABC KIDS" isn't mis-keyed as a local affiliate.
+_CALL_STOP = {"WEST", "KIDS", "WNBA", "WWE", "WIRE", "KND"}
+
+
 def _callsign(name):
     s = _fold(name).upper()
-    m = _CALL_PAREN.search(s) or _CALL_BARE.search(s)
-    return m.group(1) if m else None
+    m = _CALL_PAREN.search(s)  # a parenthesized (KABC) is explicit — always trust it
+    if m:
+        return m.group(1)
+    for m in _CALL_BARE.finditer(s):  # bare callsign: skip common non-callsign words
+        cs = m.group(1)
+        if cs not in _CALL_STOP:
+            return cs
+    return None
 
 
 def _local_network(group_name):
@@ -370,7 +385,7 @@ def _group_display(gname, drop_suffix=False):
     up = _fold(gname or "").upper()
     if any(t in up for t in ("4K", "UHD", "2160", "3840")):
         return "4K"
-    return "Failovarr"
+    return ""  # let the caller apply the configured fallback group name
 
 
 def _ppv_teamtoks(side):
@@ -862,9 +877,10 @@ class Plugin:
                 "type": "boolean",
                 "default": True,
                 "help_text": (
-                    "If the owned channel count suddenly collapses (a provider outage "
-                    "wiped channels), skip pruning and send a HIGH-priority Gotify "
-                    "alert even if notifications are Off."
+                    "If a reconcile would suddenly prune most of your channels (the "
+                    "signature of a provider outage returning an empty list), skip the "
+                    "pruning and send a HIGH-priority Gotify alert even if notifications "
+                    "are Off. A deliberate large cleanup goes through on the next run."
                 ),
             },
         ]
@@ -1012,7 +1028,6 @@ class Plugin:
         # Ownership snapshot BEFORE any change (owned = members of the two profiles).
         base_prof, adult_prof = self._get_profiles(settings)
         owned_before = self._owned_channel_ids(base_prof, adult_prof)
-        health = self._eval_health(len(owned_before), record=(not dry_run))
 
         keymap = {} if mode == "seed" else self._read_keymap()
         # Drop keymap entries whose channel was deleted externally.
@@ -1028,6 +1043,29 @@ class Plugin:
         to_create = sorted(desired - existing)
         to_prune = sorted(existing - desired)
         common = desired & existing
+
+        # Channel-collapse safeguard — measured on THIS run's computed diff, not a
+        # lagging owned count. A provider outage returns an empty/tiny stream set, so
+        # `desired` collapses and `to_prune` becomes most of the existing channels;
+        # refuse to prune and alert. A collapse that PERSISTS to the next run is treated
+        # as a real reduction (an outage would have recovered by then) and let through,
+        # so a deliberate large cleanup is never blocked forever.
+        existing_n = len(existing)
+        collapse = existing_n >= HEALTH_MIN_BASELINE and len(to_prune) > existing_n * HEALTH_DROP_FRAC
+        already_alerted = bool(self._read_health().get("alerted", False))
+        prune_blocked = bool(collapse and not already_alerted and mode != "seed")
+        if not dry_run:
+            # Next-state 'alerted' is True only on a fresh collapse we're blocking;
+            # a persisted collapse (accepted) or no-collapse resets it.
+            self._write_health({
+                "alerted": bool(collapse and not already_alerted),
+                "existing": existing_n, "to_prune": len(to_prune),
+                "desired": len(buckets), "updated": _iso(_now()),
+            })
+        health = {
+            "existing": existing_n, "desired": len(buckets), "to_prune": len(to_prune),
+            "collapse": collapse, "blocked": prune_blocked, "alert": prune_blocked,
+        }
 
         report = {
             "status": "done", "mode": mode, "dry_run": dry_run,
@@ -1068,8 +1106,6 @@ class Plugin:
             return report
 
         # ---- real write path ----
-        prune_blocked = bool(health and health.get("cliff") and mode != "seed")
-
         backup_path = self._backup(owned_before, keymap)
 
         base_prof, adult_prof = self._get_profiles(settings)
@@ -1114,6 +1150,10 @@ class Plugin:
             report["stats"]["pruned"] = pruned
             report["stats"]["prune_blocked"] = prune_blocked
 
+        # Persist the anchor right after commit. A write failure is logged loudly (disk
+        # error); the only residual gap is a hard process-kill in the millisecond window
+        # between commit and this write, which could orphan freshly-created channels from
+        # the keymap and duplicate them next run — rare, and fixed by a re-seed.
         self._write_keymap(keymap)
 
         # EPG match (own transaction / external refresh).
@@ -1139,8 +1179,8 @@ class Plugin:
             )
         self._write_status(report)
         logger.info("[Failovarr] %s (backup: %s)", report["message"], backup_path or "none")
-        if health and health.get("alert") and bool(settings.get("health_alert", True)):
-            self._emergency_alert(settings, health, len(owned_before))
+        if health.get("alert") and bool(settings.get("health_alert", True)):
+            self._emergency_alert(settings, health)
         self._ws_done(report["message"])
         send_websocket_update("updates", "update", {"type": "channels_refresh"})
         return report
@@ -1381,13 +1421,18 @@ class Plugin:
             # the last name we computed, tracked in the keymap; absent = migrate).
             desired_name = (b["display"] or k)[:255]
             stored_name = keymap[k].get("name")
-            auto_owned = stored_name is None or stored_name == cur_name
-            if auto_owned and cur_name != desired_name:
+            if stored_name is None:
+                # First time tracking this key's name (pre-name-tracking keymap):
+                # adopt the current name as the baseline WITHOUT renaming, so a manual
+                # rename made before tracking existed is never clobbered. If it's
+                # actually a stale auto-name, the next run (stored == current) fixes it.
+                keymap[k]["name"] = cur_name
+            elif stored_name == cur_name and cur_name != desired_name:
+                # Untouched since we set it (auto-owned) and now stale -> refresh.
                 name_flip.append((ch_id, desired_name))
                 keymap[k]["name"] = desired_name
                 local_changed = True
-            elif stored_name is None:
-                keymap[k]["name"] = cur_name  # record baseline (possibly a manual name)
+            # else: user manually renamed it -> leave it alone
 
             if (adult_prof.id, ch_id) not in mem_now:
                 mem_add.append(ChannelProfileMembership(channel_profile=adult_prof, channel_id=ch_id, enabled=True))
@@ -1884,30 +1929,17 @@ class Plugin:
         except Exception:
             logger.debug("could not write health file", exc_info=True)
 
-    def _eval_health(self, current, record):
-        state = self._read_health()
-        baseline = int(state.get("baseline", 0) or 0)
-        alerted = bool(state.get("alerted", False))
-        cliff = baseline >= HEALTH_MIN_BASELINE and current <= baseline * HEALTH_DROP_FRAC
-        new_alert = bool(cliff and not alerted and record)
-        dropped = max(0, baseline - current)
-        pct = int(round(100 * dropped / baseline)) if baseline else 0
-        if record:
-            if new_alert:
-                self._write_health({"baseline": baseline, "alerted": True, "current": current, "updated": _iso(_now())})
-            else:
-                self._write_health({"baseline": max(current, 0), "alerted": False, "current": current, "updated": _iso(_now())})
-        return {"current": current, "baseline": baseline, "cliff": cliff, "dropped": dropped, "pct": pct, "alert": new_alert}
-
-    def _emergency_alert(self, settings, health, current):
+    def _emergency_alert(self, settings, health):
         msg = (
-            f"Failovarr owned channel count dropped from {health.get('baseline','?')} "
-            f"to {current} (-{health.get('pct','?')}%).\n\n"
+            f"A Failovarr reconcile would have pruned {health.get('to_prune','?')} of "
+            f"{health.get('existing','?')} channels (only {health.get('desired','?')} "
+            "survived the provider gather).\n\n"
             "This is the signature of a provider outage: an M3U refresh came back "
-            "empty. Pruning was SKIPPED as a precaution — Failovarr will not delete "
+            "empty/tiny. Pruning was SKIPPED as a precaution — Failovarr will not delete "
             "channels during a suspected collapse.\n\n"
             "To recover: refresh the provider M3U accounts once they're back, then run "
-            "Failovarr reconcile."
+            "Failovarr reconcile. (If this was a deliberate large cleanup, just run it "
+            "again — the next run lets the reduction through.)"
         )
         self._gotify_send(settings, "Failovarr ⚠️ CHANNEL DROP", msg, 8)
 
@@ -1940,8 +1972,8 @@ class Plugin:
             lines.append(f"epg: {e.get('matched','?')} mapped (sources: {', '.join(srcs) or '?'})")
         h = data.get("health")
         if h:
-            flag = " ⚠️ COLLAPSE" if h.get("cliff") else ""
-            lines.append(f"health: {h.get('current','?')} owned (baseline {h.get('baseline','?')}){flag}")
+            flag = " ⚠️ COLLAPSE — prune blocked" if h.get("collapse") else ""
+            lines.append(f"health: {h.get('existing','?')} owned, {h.get('to_prune','?')} would prune{flag}")
         if data.get("backup"):
             lines.append(f"backup: {data['backup']}")
         return "\n".join(lines)
@@ -2027,12 +2059,14 @@ class Plugin:
             return
         if att.get("last") and (time.time() - att["last"]) < SCHED_COOLDOWN_SECS:
             return
+        # Acquire the lock BEFORE consuming a daily attempt — otherwise lock contention
+        # (a manual run, or another worker) would burn all 3 attempts without ever
+        # running and skip the day's reconcile.
+        if not self._acquire_lock():
+            return
         att["count"] = att.get("count", 0) + 1
         att["last"] = time.time()
         self._write_attempt(att)
-
-        if not self._acquire_lock():
-            return
         self._cancel.clear()
         ok = False
         message = ""

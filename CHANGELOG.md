@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.3
+
+Hardening from a full code-review pass:
+
+- **Fixed the channel-collapse safeguard (important).** It was checking the owned
+  channel count *before* the run mutated it, so a provider outage that returned an
+  empty stream set would pass the guard and prune everything, alerting only one run
+  too late. The guard now measures **this run's actual diff** — if a reconcile would
+  prune more than half your existing channels, it refuses and alerts *before* deleting.
+  A deliberate large cleanup still goes through on the next run.
+- **Callsign detection** no longer mis-reads common words (`NBC WEST`, `ABC KIDS`) as
+  local-affiliate callsigns.
+- **Scheduler:** the run lock is now acquired before a daily attempt is counted (lock
+  contention can't burn the day's runs), and the stale-lock age ceiling was raised so a
+  legitimate long run is never reclaimed (a crashed holder is still freed immediately).
+- **Smaller fixes:** the configurable fallback group name now actually applies; a
+  pre-name-tracking manual rename is never clobbered on upgrade.
+- Docs: README rewritten for the full v0.2.x feature set; manifest description updated.
+
 ## v0.2.2
 
 - **"Refresh PPV events" is now a clean on/off switch.** With **PPV events** ON it

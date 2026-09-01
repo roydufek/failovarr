@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.9
+
+- **Cleaner group names — strip leftover resolution tokens and decorative symbols.**
+  Group-label cleaning now uses the same quality-token test as the channel key, so a
+  nonstandard resolution tag the literal list didn't cover (e.g. `1920P`) is dropped
+  from the label just like `3840P`/`UHD` already were — and a standalone decorative
+  glyph (`☼`, `▶`, `⚽`) is dropped too. Fixes categories that split three ways over
+  pure decoration: `RELAX`, `RELAX 1920P` and `RELAX ☼` now collapse into one clean
+  `RELAX` group. Grouping only — matching keys are unchanged, so it re-groups in place
+  with no renumbering.
+
 ## v0.2.8
 
 - **City-level local affiliates group under their network** (beyond the big four).

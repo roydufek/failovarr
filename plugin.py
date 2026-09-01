@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -473,11 +473,17 @@ def _group_display(gname, drop_suffix=False, aliases=None):
     ptoks, body = _prefix_tokens(s)
     if ptoks:  # strip whatever prefix the group carries (region OR provider tag)
         s = body
-    # drop pure-quality words (RAW, 60FPS, "HD/RAW", …) — decoration, not a category
+    # drop decoration that isn't a category: pure-quality words (RAW, 60FPS, UHD,
+    # 3840P, 1920P …) and standalone symbol tokens (☼ ▶ ◉ ⚽). Use the same
+    # quality-token test as the channel key (regex-based, so any `<res>P`/`<n>FPS`
+    # is caught — not just the literal _QUALITY set), so a label like "RELAX 1920P"
+    # and a decorated "RELAX ☼" both collapse to the same clean "RELAX" group.
     kept = []
     for w in s.split():
         subs = [t for t in re.split(r"[^0-9A-Za-z]+", w) if t]
-        if subs and all(t.upper() in _QUALITY for t in subs):
+        if not subs:
+            continue  # token has no letters/digits — decorative glyph, not a word
+        if all(_is_quality_token(t.upper()) for t in subs):
             continue
         kept.append(w)
     if drop_suffix:

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="#what-it-does">What it does</a> · <a href="#install">Install</a> · <a href="#how-matching-works">Matching</a> · <a href="#settings">Settings</a> · <a href="#actions">Actions</a> · <a href="#publishing-a-new-version">Publishing</a>
+  <a href="#what-it-does">What it does</a> · <a href="#how-matching-works">Matching</a> · <a href="#channel-groups">Groups</a> · <a href="#epg--logos">EPG</a> · <a href="#ppv--live-event-failover">PPV</a> · <a href="#install">Install</a> · <a href="#settings">Settings</a> · <a href="#actions">Actions</a>
 </p>
 
 <p align="center">
@@ -29,20 +29,28 @@ universes of the same channels. **Failovarr unions them into one channel set wit
 cross-provider failover:**
 
 - **One channel per real channel.** Both providers that carry it get their streams
-  stacked as failover (priority order), so a connection outage on one provider
-  transparently falls over to the other.
+  stacked as failover (priority order), so a connection outage or an in-use
+  connection on one provider transparently falls over to the other.
 - **Nothing is lost.** A channel only one provider carries is still kept
   (single-source), never dropped.
+- **Category groups preserved.** Channels keep the provider's own categories
+  (News / Sports / Locals / Entertainment / 24-7 / …) so your client stays navigable.
 - **Locals merged by callsign.** US ABC/NBC/CBS/FOX affiliates match on their
-  callsign (`KABC`), the only stable cross-provider identifier.
+  callsign (`WSB`, `KOMO`), the only stable cross-provider identifier — even when the
+  same affiliate is packaged under two different provider groups.
 - **Adult split.** Adult channels route to a `+18` profile only; everything else
   lands in both the base and `+18` profiles.
-- **Free EPG + logos.** Each channel is mapped to a real guide entry by name and a
-  refresh pulls schedules and applies channel logos in one pass.
+- **Free EPG + logos.** Each channel is mapped to a real guide entry by name (across
+  every EPG source you've added) and a refresh pulls schedules and applies channel
+  logos in one pass.
+- **Optional PPV / live-event failover.** Surface live PPV events and merge the *same*
+  event across both providers into one failover channel, so it doesn't drop mid-event.
 
 It reconciles **in place** — a daily run adds new channels, refreshes failover
-ordering, and prunes only channels gone from *every* provider, so your channel
-numbers, EPG mappings and manual tweaks are preserved.
+ordering, re-groups, and prunes only channels gone from *every* provider, so your
+channel numbers, EPG mappings and manual tweaks are preserved. It **never
+wipe-and-rebuilds** (a channel-collapse safeguard skips destructive work if a
+provider outage suddenly empties your list), so it's safe to run unattended daily.
 
 ## How matching works
 
@@ -58,18 +66,69 @@ So the matcher is a **normalize-and-group**, not fuzzy scoring:
 
 - Strip the region prefix (`US|` / `EN|`), NFKD-fold superscripts (`ᴴᴰ` → HD,
   `ᴿᴬᵂ` → RAW), drop quality tags (`4K/UHD/FHD/HD/…`), collapse to an uppercase key.
-- **Keep** non-region prefixes (`GO|` / `PRIME|` / `MU|`) in the key so distinct
-  feeds don't over-merge, along with East/West and trailing numbers.
+- **Keep** non-region prefixes (`GO|` / `PRIME|` / `MU|`) in the key so distinct feeds
+  don't over-merge, along with East/West and trailing numbers. A trailing `+` is kept
+  too, so `AMC` and `AMC+` stay separate channels.
 - **Local stations** key on callsign; city labels are inconsistent and sometimes
   wrong, so they're never used for matching.
-- **PPV / event groups are skipped** — their dated one-off names would spawn
-  thousands of stale channels. Hand those to Dispatcharr's native auto-channel-sync.
-- **Foreign-country prefixes are filtered** (on country prefix, *not* language — US
-  Spanish-language networks like Telemundo stay).
+- **PPV / event groups are skipped** by the normal consolidation (see
+  [PPV](#ppv--live-event-failover)) — their dated one-off names would spawn thousands
+  of stale channels.
+- **Foreign channels are filtered** — by country prefix *and* non-Latin script — so a
+  German or Arabic feed never pollutes the list, while US-market channels (including
+  Spanish-language networks like Telemundo/Univision) are kept.
 
 The union of every distinct key from any provider becomes the channel set. It's a
-dictionary group-by: it runs in **seconds**, is safe to run daily, and never
-produces the confident-but-wrong matches fuzzy scoring does.
+dictionary group-by: it runs in **seconds**, is safe to run daily, and never produces
+the confident-but-wrong matches fuzzy scoring does.
+
+## Channel groups
+
+Each channel takes the (cleaned) category group of its **primary** provider's stream,
+so your client keeps the provider's own taxonomy instead of one giant list. The
+region prefix is stripped so trex's `US| PRIME` and strong's `US: PRIME` merge into
+one `PRIME` group, superscripts are folded, and — with **Tidy group names** on
+(default) — a trailing `NETWORK`/`CHANNEL`/`TV` is dropped so `ABC NETWORK` and `ABC`
+become one `ABC` group. Local affiliates group under their network (`ABC`, `NBC`, …).
+
+## EPG + logos
+
+With **Match EPG guide + logos** on, each channel is matched by name to a real guide
+entry (dummy placeholders excluded, `.us` preferred for North America) across **every
+EPG source you've added in Dispatcharr** — then a single refresh pulls schedules
+**and** applies each channel's logo. Timeshift feeds (`CINEMAX EAST`) fall back to the
+base guide. It's deterministic (exact matches only — never fuzzy), and it respects
+manually-fixed guides.
+
+> **Coverage tip:** a generic guide like myepg.top covers major cable/national
+> channels well but is thin on US local affiliates and has nothing for 24/7 loops. To
+> raise local coverage, add a second EPG source in Dispatcharr (e.g. a free EPGShare
+> US-locals feed, or Schedules Direct) — Failovarr matches across all sources
+> automatically, no reconfiguration needed.
+
+## PPV / live-event failover
+
+*Experimental, opt-in — off by default.* Turn on **PPV events** to surface live PPV
+events (normally skipped) as channels, and merge the **same event across both
+providers** into one failover channel so it doesn't drop mid-event.
+
+- Parses each provider's event name into an order-independent key — a `A vs B` matchup
+  or a normalized title for races/single events (`ITALY: RACE`) — so trex and strong,
+  which resell the same upstream with near-identical names, pair on the same event.
+- Idle (`NO EVENT`) slots and finished events are filtered out.
+- **Completely separate from your stable channels:** its own channel-number range
+  (default `90000+`), grouped per package, and excluded from the stable set's health
+  accounting — so PPV's fast churn can never disturb your main lineup.
+- **Curated:** a light default filter drops only clear junk (high-school, per-team
+  duplicate feeds, dead/foreign); racing, college and minor-league are kept. Curate
+  further by disabling PPV groups in Dispatcharr (Failovarr only mines *enabled*
+  groups) or by editing the skip regex.
+- **Refreshes once daily** with the main reconcile by default — your client pulls the
+  playlist about once a day anyway, and failover works during *playback* with no
+  refresh. Set an intra-day interval only if your client refreshes more often.
+
+**Refresh PPV events** is a clean on/off switch: with PPV events **on** it builds the
+event channels; with it **off** it removes them all.
 
 ## Install
 
@@ -83,9 +142,9 @@ https://raw.githubusercontent.com/roydufek/failovarr/main/manifest.json
 Then find Failovarr in the available plugins and click install. Updates show up
 automatically when a new version is published.
 
-The release manifests are **GPG-signed**. To get the ✓ *Verified Signature* badge
-in Dispatcharr, paste the public key below into the repo's **public key** field when
-you add it. This is optional — installs work fine unsigned.
+The release manifests are **GPG-signed**. To get the ✓ *Verified Signature* badge in
+Dispatcharr, paste the public key below into the repo's **public key** field when you
+add it. This is optional — installs work fine unsigned.
 
 <details>
 <summary><strong>Failovarr signing public key</strong></summary>
@@ -114,27 +173,35 @@ Q+hTvLOrAQ==
 
 After installing, enable Failovarr and configure:
 
+**Providers & scope**
 - **Providers** — comma-separated M3U account names in failover priority order
-  (e.g. `trex,strong`). The first is primary (order 0). Only streams in each
-  account's **enabled groups** are considered.
-- **Skip these groups (regex)** — PPV/event groups to skip; default covers
-  `PPV|EVENT|ESPN+|FLO|NFHS|DAZN|…`.
-- **Include 24/7 channels** — keep 24/7 loop channels (default on).
-- **Filter foreign-country channels** / **Always keep US-market channels** — drop
-  foreign-country prefixes while protecting US channels regardless of language.
-- **Merge quality variants** — HD + 4K of the same channel become one (more
-  failover) vs kept separate.
-- **Adult split** + **base / +18 profile names** — route adult channels to the
-  `+18` profile only.
-- **Match EPG guide + logos** / **Respect manual EPG mappings** — deterministic
-  name-based guide matching; don't overwrite hand-fixed guides.
-- **First channel number** / **Channel group** — numbering and grouping for created
-  channels.
-- **Daily reconcile time (HH:MM, UTC)** — blank disables. Reconcile only, never
-  seeds/wipes.
-- **Gotify** — optional notifications for scheduled runs.
-- **Channel-drop safeguard** — if the owned channel count collapses (provider
-  outage), skip pruning and send a high-priority alert.
+  (e.g. `trex,strong`). The first is primary (order 0). Only streams in each account's
+  **enabled groups** are considered.
+- **Skip these groups (regex)** — PPV/event groups to leave to the PPV feature or
+  native auto-sync.
+- **Include 24/7 channels** · **Filter foreign-country channels** / **Always keep
+  US-market channels** · **Region prefixes to strip** · **Merge quality variants**
+  (HD + 4K → one) · **Skip junk/divider names**.
+
+**Grouping, locals & profiles**
+- **Tidy group names** — merge `ABC NETWORK` + `ABC`, drop resolution-only names.
+- **Detect locals by name** — merge the same affiliate packaged under different groups.
+- **Adult split** + **base / +18 profile names** + **adult detection**.
+- **First channel number** · **Fallback channel group name**.
+
+**EPG**
+- **Match EPG guide + logos** · **Respect manual EPG mappings**.
+
+**Schedule & notifications**
+- **Daily reconcile time (HH:MM, UTC)** — blank disables. Reconcile only, never wipes.
+- **Gotify** — off / on-failure / **on-change** / on-completion; set server URL + token.
+- **Channel-drop safeguard** — high-priority alert + skip pruning on a provider-outage
+  collapse.
+
+**PPV (experimental, off by default)**
+- **PPV events** — master toggle · **PPV categories to skip (regex)** · **minimum
+  providers per event** · **PPV / event group match** · **Extra PPV refresh interval
+  (0 = daily only)** · **First PPV channel number**.
 
 ## Actions
 
@@ -142,27 +209,28 @@ After installing, enable Failovarr and configure:
   nothing.
 - **Reconcile now** — consolidate in place (add / update / prune by normalized name).
 - **Match EPG + logos** — map channels to guide entries and refresh, on its own.
-- **Seed / reset** — delete all Failovarr-owned channels and rebuild from scratch.
-  For the initial build or a deliberate clean re-seed only.
-- **View last results** — the report from the most recent run.
-- **Clear operation lock** — recover from an interrupted run.
+- **Preview PPV events** / **Refresh PPV events** — dry-run / build live PPV channels
+  (or remove them all when PPV events is off).
+- **Seed / reset** — delete all Failovarr-owned channels and rebuild from scratch (for
+  the initial build or a deliberate clean re-seed only).
+- **View last results** · **Clear operation lock**.
 
 ## Notes
 
-- The container runs in UTC; the schedule time is UTC.
+- The container runs in UTC; schedule times are UTC.
 - No external dependencies (pure stdlib + Django ORM).
-- Failovarr **owns** its channels (the base/`+18` profile members) and reconciles
-  them in place; it never mass-deletes as a side effect. The one destructive action,
-  **Seed / reset**, is explicit, confirmed, and backed up first.
+- Failovarr **owns** its channels (the base/`+18` profile members) and reconciles them
+  in place; it never mass-deletes as a side effect. The one destructive action, **Seed
+  / reset**, is explicit, confirmed, and backed up first. PPV channels are tracked and
+  numbered separately and never affect the stable set.
 
 ## Publishing a new version
 
 1. Bump `__version__` in `plugin.py` and `version` in `plugin.json`, add a
    `CHANGELOG.md` entry, commit.
 2. `git push github main` then `git tag vX.Y.Z && git push github vX.Y.Z`.
-3. The `release` workflow builds `failovarr-X.Y.Z.zip`, computes its sha256,
-   refreshes `manifest.json` + `plugin-manifest.json`, GPG-signs them, and creates
-   the GitHub Release. Dispatcharr instances see the update on their next repo
-   refresh.
+3. The `release` workflow builds `failovarr-X.Y.Z.zip`, computes its sha256, refreshes
+   `manifest.json` + `plugin-manifest.json`, GPG-signs them, and creates the GitHub
+   Release. Dispatcharr instances see the update on their next repo refresh.
 
 The tag (`vX.Y.Z`) must match the version in `plugin.json`, or the workflow fails.

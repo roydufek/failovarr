@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0
+
+- **Subset profiles — curated HDHR / Plex lineups.** New setting to define additional
+  channel profiles that each hold only the channels in a chosen set of category groups,
+  so you can hand a client (Plex/Emby/Jellyfin) a small, tailored lineup via its own
+  HDHR URL. One per line: `name = GROUP, GROUP` (e.g. `plex = ENTERTAINMENT`); each
+  becomes a channel profile you point the client's HDHR DVR at
+  (`/hdhr/<name>/discover.json`). Group names are the cleaned category labels,
+  case-insensitive, comma-separated; define as many lineups as you like (`plex`, `kids`,
+  `sports`…). **Purely additive** — membership is re-asserted every reconcile and your
+  base `failovarr` / `failovarr+18` profiles are never touched. Blank by default (off).
+
 ## v0.2.9
 
 - **Cleaner group names — strip leftover resolution tokens and decorative symbols.**

@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.2.9"
+__version__ = "0.3.0"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -461,6 +461,29 @@ def _parse_group_aliases(raw):
     return out
 
 
+def _parse_subset_profiles(raw, reserved=()):
+    """Parse subset-profile config into ``[(profile_name, frozenset(GROUPS_UPPER)), …]``.
+    One lineup per line OR separated by ';':  ``name = GROUP, GROUP``. Each becomes an
+    ADDITIVE channel profile (an HDHR/Plex lineup) holding only channels whose cleaned
+    category group is in the list — the base lineup is never touched. A name colliding
+    with the base/adult profile (``reserved``), or a line with no name/groups, is skipped;
+    a repeated profile name is ignored after its first occurrence."""
+    reserved = {r.lower() for r in reserved}
+    out, seen = [], set()
+    for line in re.split(r"[\r\n;]+", raw or ""):
+        m = re.match(r"\s*(.+?)\s*[:=]\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        groups = frozenset(g.strip().upper() for g in m.group(2).split(",") if g.strip())
+        low = name.lower()
+        if not name or not groups or low in reserved or low in seen:
+            continue
+        seen.add(low)
+        out.append((name, groups))
+    return out
+
+
 def _group_display(gname, drop_suffix=False, aliases=None):
     """Clean a provider group name into a channel-group label for the IPTV client:
     strip ANY leading prefix (``US|``/``US:``/``18|``/``MU|`` …) so trex's ``US| PRIME``
@@ -814,6 +837,20 @@ class Plugin:
                 "type": "string",
                 "default": DEFAULT_ADULT_DETECT,
                 "help_text": "Group names matching this are treated as adult (e.g. '18| FOR ADULTS').",
+            },
+            {
+                "id": "subset_profiles",
+                "label": "Subset profiles (HDHR / Plex lineups)",
+                "type": "string",
+                "default": "",
+                "help_text": (
+                    "Curated additive lineups for HDHR clients (Plex/Emby/Jellyfin). One "
+                    "per line (or separated by ';'): 'name = GROUP, GROUP'. Each becomes a "
+                    "channel profile holding ONLY channels in those (cleaned) category "
+                    "groups — your base lineup is never touched. Point the client's HDHR "
+                    "DVR at /hdhr/<name>/discover.json. Example: 'plex = ENTERTAINMENT'. "
+                    "Group names are case-insensitive; blank disables the feature."
+                ),
             },
             {
                 "id": "epg_match",
@@ -1241,6 +1278,7 @@ class Plugin:
         backup_path = self._backup(owned_before, keymap)
 
         base_prof, adult_prof = self._get_profiles(settings)
+        subsets = self._get_subset_profiles(cfg)  # additive HDHR/Plex lineups
         gcache = {}  # cleaned group name -> ChannelGroup (built lazily)
 
         with transaction.atomic():
@@ -1258,7 +1296,7 @@ class Plugin:
 
             # CREATE new channels.
             created = self._create_channels(
-                to_create, buckets, gcache, base_prof, adult_prof, cfg, keymap, next_num
+                to_create, buckets, gcache, base_prof, adult_prof, cfg, keymap, next_num, subsets
             )
             report["stats"]["created"] = created
 
@@ -1266,7 +1304,7 @@ class Plugin:
             updated = 0
             if common:
                 updated = self._update_channels(
-                    common, buckets, keymap, base_prof, adult_prof, cfg, gcache
+                    common, buckets, keymap, base_prof, adult_prof, cfg, gcache, subsets
                 )
             report["stats"]["updated"] = updated
 
@@ -1448,7 +1486,7 @@ class Plugin:
             cache[name] = g
         return g
 
-    def _create_channels(self, keys, buckets, gcache, base_prof, adult_prof, cfg, keymap, next_num):
+    def _create_channels(self, keys, buckets, gcache, base_prof, adult_prof, cfg, keymap, next_num, subsets=()):
         if not keys:
             return 0
         nprov = cfg["nproviders"]
@@ -1484,6 +1522,11 @@ class Plugin:
             mem_rows.append(ChannelProfileMembership(channel_profile=adult_prof, channel_id=ch.id, enabled=True))
             if not (split and is_adult):
                 mem_rows.append(ChannelProfileMembership(channel_profile=base_prof, channel_id=ch.id, enabled=True))
+            # Additive subset lineups: also add to any subset profile whose group list matches.
+            grp_up = (buckets[k]["group"] or "").upper()
+            for subprof, sgroups in subsets:
+                if grp_up in sgroups:
+                    mem_rows.append(ChannelProfileMembership(channel_profile=subprof, channel_id=ch.id, enabled=True))
 
         for chunk in _chunks(cs_rows, 2000):
             ChannelStream.objects.bulk_create(chunk, ignore_conflicts=True)
@@ -1492,7 +1535,7 @@ class Plugin:
         return len(created_objs)
 
     # -------------------------------------------------------------- update
-    def _update_channels(self, keys, buckets, keymap, base_prof, adult_prof, cfg, gcache):
+    def _update_channels(self, keys, buckets, keymap, base_prof, adult_prof, cfg, gcache, subsets=()):
         """Sync stream order, membership, adult flag and channel group for existing channels."""
         nprov = cfg["nproviders"]
         split = cfg["adult_split"]
@@ -1513,8 +1556,9 @@ class Plugin:
             .values_list("id", "is_adult", "channel_group_id", "name")
         }
         mem_now = set()
+        managed_pids = [base_prof.id, adult_prof.id] + [sp.id for sp, _ in subsets]
         for pid, cid in ChannelProfileMembership.objects.filter(
-            channel_id__in=ch_ids, channel_profile_id__in=[base_prof.id, adult_prof.id]
+            channel_id__in=ch_ids, channel_profile_id__in=managed_pids
         ).values_list("channel_profile_id", "channel_id"):
             mem_now.add((pid, cid))
 
@@ -1586,6 +1630,20 @@ class Plugin:
                     channel_profile=base_prof, channel_id=ch_id
                 ).delete()
                 local_changed = True
+
+            # Additive subset lineups: membership tracks whether the channel's group is listed.
+            grp_up = (b["group"] or "").upper()
+            for subprof, sgroups in subsets:
+                want = grp_up in sgroups
+                has = (subprof.id, ch_id) in mem_now
+                if want and not has:
+                    mem_add.append(ChannelProfileMembership(channel_profile=subprof, channel_id=ch_id, enabled=True))
+                    local_changed = True
+                elif has and not want:
+                    ChannelProfileMembership.objects.filter(
+                        channel_profile=subprof, channel_id=ch_id
+                    ).delete()
+                    local_changed = True
 
             if local_changed:
                 changed += 1
@@ -1932,6 +1990,13 @@ class Plugin:
             "skip_junk": bool(settings.get("skip_junk_names", True)),
             "skip_stale": bool(settings.get("skip_stale", True)),
             "adult_split": bool(settings.get("adult_profile_split", True)),
+            "subset_profiles": _parse_subset_profiles(
+                settings.get("subset_profiles", ""),
+                reserved=(
+                    (settings.get("base_profile") or "failovarr").strip(),
+                    (settings.get("adult_profile") or "failovarr+18").strip(),
+                ),
+            ),
             "epg_match": bool(settings.get("epg_match", True)),
             "respect_manual_epg": bool(settings.get("respect_manual_epg", True)),
             "number_start": int(settings.get("channel_number_start", 1) or 0),
@@ -1957,6 +2022,24 @@ class Plugin:
         else:
             adult = base
         return base, adult
+
+    def _get_subset_profiles(self, cfg):
+        """Resolve configured subset lineups to ``[(ChannelProfile, frozenset(groups)), …]``
+        (creating the profiles as needed). Additive HDHR/Plex views; empty when none set.
+
+        A NEW profile is created with ``_start_empty`` so Dispatcharr's post-save signal
+        does NOT auto-populate it with every channel — the reconcile then fills it with
+        only the channels in the listed groups. (An existing profile is reused as-is; the
+        update pass keeps its owned membership in sync with the group list.)"""
+        out = []
+        for name, groups in cfg.get("subset_profiles", []):
+            prof = ChannelProfile.objects.filter(name=name).first()
+            if prof is None:
+                prof = ChannelProfile(name=name)
+                prof._start_empty = True  # skip the auto-add-all-channels signal
+                prof.save()
+            out.append((prof, groups))
+        return out
 
     def _owned_channel_ids(self, base_prof, adult_prof):
         pids = {base_prof.id, adult_prof.id}

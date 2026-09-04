@@ -232,6 +232,25 @@ After installing, enable Failovarr and configure:
   providers per event** · **PPV / event group match** · **Extra PPV refresh interval
   (0 = daily only)** · **First PPV channel number**.
 
+## Using a subset profile with Plex / Emby / Jellyfin (HDHR)
+
+Dispatcharr emulates an HDHomeRun **per channel profile**, and each subset profile is its
+own distinct tuner device — so a curated lineup drops straight into Plex's DVR:
+
+1. Add `plex = ENTERTAINMENT` (or any groups) under **Subset profiles** and run a
+   reconcile. This creates a `plex` profile containing only those channels.
+2. In Plex → **Live TV & DVR → Set up** → enter the tuner manually:
+   `http://<dispatcharr-host>/hdhr/plex/discover.json`
+3. For the guide, use the XMLTV URL **with `cachedlogos=false`**:
+   `http://<dispatcharr-host>/output/epg/plex?cachedlogos=false`
+   — the `?cachedlogos=false` is important: without it the guide hands Plex logo URLs
+   proxied through Dispatcharr, which Plex won't cache; with it Plex gets the direct
+   source logo URLs and displays channel icons correctly.
+
+Because each profile is a separate HDHR device (unique `DeviceID`), you can define several
+lineups (`plex`, `kids`, `sports`…) and add each as its own tuner. The M3U variant is
+`http://<dispatcharr-host>/output/m3u/plex` if a client prefers a playlist over HDHR.
+
 ## Actions
 
 - **Preview (dry-run)** — reports exactly what the reconcile would change, writes

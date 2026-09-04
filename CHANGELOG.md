@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.1
+
+- **Base / +18 profiles now auto-create cleanly on a fresh install.** The plugin already
+  created the base and `+18` channel profiles if they didn't exist, but a newly created
+  profile tripped Dispatcharr's "add every channel" signal — so on a first-time install
+  (with no pre-existing profiles) they'd fill with all channels instead of only
+  Failovarr's. They're now created **empty** (the same way subset profiles are) and the
+  reconcile fills them, so a fresh install gets clean profiles. Existing setups are
+  unaffected (their profiles already exist and are reused untouched). Also documented that
+  the profiles are auto-created, in the README and the settings help.
+
 ## v0.3.0
 
 - **Subset profiles — curated HDHR / Plex lineups.** New setting to define additional

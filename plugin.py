@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -821,7 +821,7 @@ class Plugin:
                 "type": "select",
                 "options": [{"value": n, "label": n} for n in prof_names] or [{"value": base_default, "label": base_default}],
                 "default": base_default,
-                "help_text": "The profile that holds everything EXCEPT adult channels.",
+                "help_text": "The profile that holds everything EXCEPT adult channels. Auto-created (empty) if it doesn't exist yet.",
             },
             {
                 "id": "adult_profile",
@@ -829,7 +829,7 @@ class Plugin:
                 "type": "select",
                 "options": [{"value": n, "label": n} for n in prof_names] or [{"value": adult_default, "label": adult_default}],
                 "default": adult_default,
-                "help_text": "The profile that holds every channel including adult (the superset).",
+                "help_text": "The profile that holds every channel including adult (the superset). Auto-created (empty) if it doesn't exist yet.",
             },
             {
                 "id": "adult_detect",
@@ -2013,33 +2013,33 @@ class Plugin:
         }
 
     # ----------------------------------------------------------- profiles/group
+    def _ensure_profile(self, name):
+        """Get a channel profile by name, **creating it if it doesn't exist**. A newly
+        created profile is created EMPTY (``_start_empty``) so Dispatcharr's post-save
+        signal does not auto-populate it with every existing channel — the reconcile
+        then controls its membership. An existing profile is returned untouched."""
+        prof = ChannelProfile.objects.filter(name=name).first()
+        if prof is None:
+            prof = ChannelProfile(name=name)
+            prof._start_empty = True  # skip the auto-add-all-channels post_save signal
+            prof.save()
+        return prof
+
     def _get_profiles(self, settings):
-        base_name = (settings.get("base_profile") or "failovarr").strip()
-        adult_name = (settings.get("adult_profile") or "failovarr+18").strip()
-        base, _ = ChannelProfile.objects.get_or_create(name=base_name)
+        # The base (family-safe) and adult (+18) profiles are auto-created if missing.
+        base = self._ensure_profile((settings.get("base_profile") or "failovarr").strip())
         if bool(settings.get("adult_profile_split", True)):
-            adult, _ = ChannelProfile.objects.get_or_create(name=adult_name)
+            adult = self._ensure_profile((settings.get("adult_profile") or "failovarr+18").strip())
         else:
             adult = base
         return base, adult
 
     def _get_subset_profiles(self, cfg):
         """Resolve configured subset lineups to ``[(ChannelProfile, frozenset(groups)), …]``
-        (creating the profiles as needed). Additive HDHR/Plex views; empty when none set.
-
-        A NEW profile is created with ``_start_empty`` so Dispatcharr's post-save signal
-        does NOT auto-populate it with every channel — the reconcile then fills it with
-        only the channels in the listed groups. (An existing profile is reused as-is; the
-        update pass keeps its owned membership in sync with the group list.)"""
-        out = []
-        for name, groups in cfg.get("subset_profiles", []):
-            prof = ChannelProfile.objects.filter(name=name).first()
-            if prof is None:
-                prof = ChannelProfile(name=name)
-                prof._start_empty = True  # skip the auto-add-all-channels signal
-                prof.save()
-            out.append((prof, groups))
-        return out
+        (auto-creating each profile empty). Additive HDHR/Plex views; empty when none set.
+        The reconcile fills each with only the channels in its listed groups, and the
+        update pass keeps that owned membership in sync as groups drift."""
+        return [(self._ensure_profile(name), groups) for name, groups in cfg.get("subset_profiles", [])]
 
     def _owned_channel_ids(self, base_prof, adult_prof):
         pids = {base_prof.id, adult_prof.id}

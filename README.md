@@ -208,7 +208,14 @@ After installing, enable Failovarr and configure:
   and file local stations under their network. Beyond ABC/NBC/CBS/FOX, DirecTV-style
   `CITY|` affiliates are grouped under a clean network label (CW, PBS, Telemundo,
   MyNetworkTV, Univision, Independent) instead of a raw provider bucket.
-- **Adult split** + **base / +18 profile names** + **adult detection**.
+- **Adult split** + **base / +18 profile names** + **adult detection**. The base and
+  `+18` channel profiles are **created automatically if they don't exist** (empty, then
+  filled by the reconcile) — you don't need to pre-create them.
+- **Subset profiles (HDHR / Plex lineups)** — define extra channel profiles that each
+  hold only the channels in chosen category groups, for handing a client a small tailored
+  lineup via its own HDHR URL. One per line, `name = GROUP, GROUP` (e.g.
+  `plex = ENTERTAINMENT`); point the client's HDHR DVR at `/hdhr/<name>/discover.json`.
+  Purely additive — your base lineup is never touched — and the profiles are auto-created.
 - **First channel number** · **Fallback channel group name**.
 
 **EPG**

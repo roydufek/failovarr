@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.2
+
+- **Much broader foreign-channel filter (backstop against creep).** The foreign-country
+  prefix list was small, so if a provider auto-enabled a foreign group with a prefix the
+  filter didn't know (e.g. `AFR| CABO VERDE`), its channels leaked into the lineup. Audited
+  every group prefix across a live two-provider setup and expanded the list to ~90 country/
+  region codes (UK, ASIA, AFR, SE, DK, NO, BR, LAT, CH, AT, FI, AU, IE, HK, SG, MY, KR, and
+  many more). US-market channels (`US|`/`EN|`, protected by *keep US-market*) are untouched,
+  so US Spanish like Telemundo/Univision still comes through. Deliberately excludes prefixes
+  that look like codes but are content, not countries — `NA` (North America), `TS` (Tennis),
+  `WC`/`WT` (World Cricket) — so legit sports aren't filtered. Now a foreign group that gets
+  enabled by accident is dropped at reconcile instead of leaking channels.
+- **Drop idle-event placeholders from the lineup.** Dead PPV/event slots named
+  `- NO EVENT STREAMING -`, `COMING SOON`, `OFF AIR`, `PLACEHOLDER` were becoming real
+  channels when they sat in a group whose name didn't trigger the PPV skip (e.g. a
+  `US: NBA PASS PPV` feed in a plain group). The junk filter now rejects these idle
+  placeholders directly, so they never become channels regardless of their group.
+
 ## v0.3.1
 
 - **Base / +18 profiles now auto-create cleanly on a fresh install.** The plugin already

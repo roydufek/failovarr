@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -182,9 +182,21 @@ _QUALITY = {
 # Foreign COUNTRY prefixes to filter (NOT languages — US-market channels are kept
 # regardless of language). Matched as the leading ``XX|`` / ``XX:`` token.
 _FOREIGN = {
+    # Original set.
     "CL", "NL", "AR", "MX", "DE", "FR", "ES", "IT", "PT", "GR", "TR", "RU", "PL",
     "RO", "JP", "CN", "KU", "IL", "IR", "AL", "BG", "PK", "AF", "SO", "BE", "MT",
     "IN", "QC", "LA",
+    # Comprehensive country/region prefixes seen across trex+strong (audit 2026-09-08).
+    # US-market channels use US|/EN| and are protected by keep_us_market, so this only
+    # filters genuinely foreign feeds. NOTE: deliberately EXCLUDES codes that collide with
+    # non-country content — NA (North America), TS (Tennis), WC/WT (World Cricket),
+    # MC (radio), and **NO** (matches "- NO EVENT STREAMING -" PPV placeholders, not
+    # Norway) — never add those here.
+    "UK", "ASIA", "CA", "SE", "LAT", "BR", "AFR", "DK", "CZ", "IS", "EXYU",
+    "CH", "AT", "FI", "AU", "IE", "CY", "HR", "CG", "NZ", "ID", "BH", "MK", "HU",
+    "CRB", "CR", "MA", "EU", "SL", "RS", "AZ", "SG", "HK", "SK", "MY", "PH", "SU",
+    "SR", "SI", "KR", "AM", "KO", "LT", "EST", "BY", "UKR", "GE", "KA", "BAN", "NP",
+    "AFG", "UZ", "TJ", "TH", "TAI", "VT", "BO", "VE", "VI", "KZ", "LV", "AG", "TN",
 }
 
 # PPV/event parsing. Provider event streams pack status + matchup + time + package
@@ -419,6 +431,11 @@ def _is_junk(name):
     # Labelled divider/placeholder, e.g. "##### FOX WISCONSIN #####" or
     # "## MAX ESPN HD/RAW 60fps ##" — providers bookend section headers with 2+ hashes.
     if re.search(r"#{2,}", n):
+        return True
+    # Idle-event placeholder ("- NO EVENT STREAMING -", "COMING SOON", "OFF AIR",
+    # "PLACEHOLDER") — a dead PPV/event slot, never a real channel. These slip past the
+    # PPV group-skip when they sit in a non-PPV-named group, so reject them here too.
+    if _PPV_IDLE.search(n):
         return True
     return False
 

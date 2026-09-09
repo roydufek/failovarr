@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -102,6 +102,9 @@ KEYMAP_FILE = os.path.join(DATA_DIR, "keymap.json")
 # kept out of the stable channel set's ownership/health accounting entirely.
 PPV_KEYMAP_FILE = os.path.join(DATA_DIR, "ppv_keymap.json")
 HEALTH_FILE = os.path.join(DATA_DIR, "health.json")
+# Group-governance baseline (groups Roy has decided on) + last-notified set, for the
+# approve-to-enable new-group workflow. Plugin-owned, survives the atomic-swap update.
+GROUP_GOV_FILE = os.path.join(DATA_DIR, "group_governance.json")
 BACKUP_GLOB = os.path.join(DATA_DIR, "backup_*.json")
 
 # Channel-drop safeguard. If a reconcile's computed diff would prune more than
@@ -157,6 +160,8 @@ _SCHED_DEFAULTS = {
     "channel_group_name": "Failovarr",
     "merge_group_suffixes": True,
     "locals_by_name": True,
+    "group_governance": False,
+    "group_governance_auto": False,
     "ppv_events": False,
     "ppv_min_providers": 1,
     "ppv_groups": _PPV_DEFAULT_GROUPS,
@@ -407,6 +412,19 @@ def _is_non_latin(name):
         return False
     non_ascii = sum(1 for c in letters if ord(c) > 127)
     return non_ascii >= max(2, len(letters) * 0.5)
+
+
+def _group_is_foreign(name, region_allow, keep_us_market):
+    """Would the plugin's foreign filter drop this group/channel? The SAME test the
+    gather loop applies per stream (region prefix vs the user's region_allow, then the
+    _FOREIGN denylist / non-Latin script), so it's region-aware — a `region_allowlist=DE`
+    user keeps DE and filters US, not the other way round. Single source of truth for the
+    group-governance keep/skip verdict and its notification labels."""
+    cp = _country_prefix(name)
+    protected = keep_us_market and cp in region_allow
+    if protected:
+        return False
+    return bool(cp and cp in _FOREIGN) or _is_non_latin(name)
 
 
 # Quality-tier rank for intra-provider stream ordering (lower is tried first, so a
@@ -941,6 +959,32 @@ class Plugin:
                 ),
             },
             {
+                "id": "group_governance",
+                "label": "Group governance (watch + approve new provider groups)",
+                "type": "boolean",
+                "default": False,
+                "help_text": (
+                    "Watch for new provider groups/VOD categories (from nightly refreshes) "
+                    "and notify you (Gotify) instead of letting them silently go live. New "
+                    "groups stay DISABLED until you approve. Requires Dispatcharr's "
+                    "'auto-enable new groups' to be OFF — this plugin enforces that on each "
+                    "run. Use the 'Check for new groups' / 'Approve' / 'Dismiss' actions, or "
+                    "turn on Auto mode below. Off = feature dormant."
+                ),
+            },
+            {
+                "id": "group_governance_auto",
+                "label": "↳ Auto mode (auto-enable kept new groups)",
+                "type": "boolean",
+                "default": False,
+                "help_text": (
+                    "With Group governance on: each run auto-enables new groups your foreign "
+                    "filter would KEEP (region_allowlist / keep US-market — NOT hardcoded to "
+                    "US) and reconciles them in; foreign/junk stay disabled. Off = manual: "
+                    "you're notified and approve via the action buttons."
+                ),
+            },
+            {
                 "id": "skip_stale",
                 "label": "Skip dead/stale streams",
                 "type": "boolean",
@@ -1086,6 +1130,12 @@ class Plugin:
             return self._action_start("epg", dry_run=False, settings=settings)
         if action in ("ppv_preview", "ppv_refresh"):
             return self._action_start("ppv", dry_run=(action == "ppv_preview"), settings=settings)
+        if action == "scan_groups":
+            return self._action_governance("scan", settings)
+        if action == "approve_new_groups":
+            return self._action_governance("approve", settings)
+        if action == "dismiss_new_groups":
+            return self._action_governance("dismiss", settings)
         if action == "stop":
             self._cancel.set()
             return {"status": "ok", "message": "Cancellation requested."}
@@ -1152,6 +1202,22 @@ class Plugin:
         self._release_lock()
         self._cancel.clear()
         return {"status": "ok", "message": "Lock cleared." if existed else "No lock was held."}
+
+    def _action_governance(self, mode, settings):
+        if not bool(settings.get("group_governance", False)):
+            return {"status": "ok", "message": "Group governance is off — enable it in settings first."}
+        if not self._acquire_lock():
+            return {"status": "error", "message": "A run is already in progress (locked). Use 'Clear lock' if it's stuck."}
+        self._cancel.clear()
+        try:
+            report = self._group_governance(dict(settings), mode=mode, do_reconcile=(mode == "approve"))
+            return {"status": "ok", "message": report.get("message", "Done."), "result": report}
+        except Exception as exc:
+            logger.exception("failovarr group-governance action failed")
+            return {"status": "error", "message": f"Group governance failed: {exc}"}
+        finally:
+            close_old_connections()
+            self._release_lock()
 
     # --------------------------------------------------------- cross-proc lock
     def _acquire_lock(self):
@@ -2021,6 +2087,8 @@ class Plugin:
             "merge_group_suffixes": bool(settings.get("merge_group_suffixes", True)),
             "group_aliases": _parse_group_aliases(settings.get("group_aliases", _GROUP_ALIAS_DEFAULT)),
             "locals_by_name": bool(settings.get("locals_by_name", True)),
+            "group_governance": bool(settings.get("group_governance", False)),
+            "group_governance_auto": bool(settings.get("group_governance_auto", False)),
             "ppv_events": bool(settings.get("ppv_events", False)),
             "ppv_min_providers": max(1, int(settings.get("ppv_min_providers", 1) or 1)),
             "ppv_groups": settings.get("ppv_groups", _PPV_DEFAULT_GROUPS),
@@ -2175,6 +2243,182 @@ class Plugin:
         except Exception:
             logger.debug("could not write health file", exc_info=True)
 
+    # ------------------------------------------------------- group governance
+    def _read_gov(self):
+        try:
+            with open(GROUP_GOV_FILE, "r", encoding="utf-8") as fh:
+                return json.load(fh) or {}
+        except Exception:
+            return {}
+
+    def _write_gov(self, data):
+        try:
+            tmp = GROUP_GOV_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            os.replace(tmp, GROUP_GOV_FILE)
+        except Exception:
+            logger.debug("could not write group-governance file", exc_info=True)
+
+    # Dispatcharr per-account keys that auto-enable newly-imported groups. Governance
+    # REQUIRES these off (new groups must arrive disabled), so it enforces that on each run.
+    _AUTO_ADD_KEYS = (
+        "auto_enable_new_groups_live",
+        "auto_enable_new_groups_vod",
+        "auto_enable_new_groups_series",
+    )
+
+    def _enforce_auto_add_off(self, providers):
+        """Ensure Dispatcharr's auto-enable-new-groups is OFF on every provider account —
+        the premise governance depends on. Returns the list of account names it had to flip."""
+        flipped = []
+        for acct in providers:
+            cp = dict(acct.custom_properties or {})
+            if any(cp.get(k, True) for k in self._AUTO_ADD_KEYS):
+                for k in self._AUTO_ADD_KEYS:
+                    cp[k] = False
+                acct.custom_properties = cp
+                acct.save(update_fields=["custom_properties"])
+                flipped.append(acct.name)
+        return flipped
+
+    def _snapshot_groups(self, providers):
+        """Current provider groups per account: {acct_name: {'live': set(names), 'vod': set(names)}}.
+        'live' = ChannelGroupM3UAccount; 'vod' = M3UVODCategoryRelation (movies + series categories)."""
+        snap = {}
+        try:
+            from apps.vod.models import M3UVODCategoryRelation
+        except Exception:
+            M3UVODCategoryRelation = None
+        for acct in providers:
+            live = set(
+                ChannelGroupM3UAccount.objects.filter(m3u_account=acct)
+                .values_list("channel_group__name", flat=True)
+            )
+            vod = set()
+            if M3UVODCategoryRelation is not None:
+                vod = set(
+                    M3UVODCategoryRelation.objects.filter(m3u_account=acct)
+                    .values_list("category__name", flat=True)
+                )
+            snap[acct.name] = {"live": {n for n in live if n}, "vod": {n for n in vod if n}}
+        return snap
+
+    def _enable_groups(self, acct, live_names, vod_names):
+        """Enable the named live groups / VOD categories on an account (approve)."""
+        if live_names:
+            ChannelGroupM3UAccount.objects.filter(
+                m3u_account=acct, channel_group__name__in=list(live_names)
+            ).update(enabled=True)
+        if vod_names:
+            try:
+                from apps.vod.models import M3UVODCategoryRelation
+                M3UVODCategoryRelation.objects.filter(
+                    m3u_account=acct, category__name__in=list(vod_names)
+                ).update(enabled=True)
+            except Exception:
+                logger.debug("could not enable VOD categories", exc_info=True)
+
+    def _group_governance(self, settings, mode, do_reconcile):
+        """Watch/approve new provider groups. mode: 'scan' (notify only), 'auto'
+        (enable KEPT new groups), 'approve' (same as auto, from the button), 'dismiss'
+        (baseline all pending, enable nothing). Returns a short report dict."""
+        region_allow = self._region_allow(settings)
+        cfg = self._engine_cfg(settings, region_allow)
+        keep_us = cfg["keep_us_market"]
+        providers = self._resolve_providers(settings)
+        by_id = {a.name: a for a in providers}
+
+        flipped = self._enforce_auto_add_off(providers)
+        current = self._snapshot_groups(providers)
+        gov = self._read_gov()
+        baseline = gov.get("baseline", {})
+        first_run = not baseline
+
+        # pending = current groups not yet in the baseline (Roy hasn't decided on them).
+        pending = []  # (acct, typ, name, is_foreign)
+        for acct_name, types in current.items():
+            for typ, names in types.items():
+                base = set(baseline.get(acct_name, {}).get(typ, []))
+                for name in sorted(names - base):
+                    foreign = _group_is_foreign(name, region_allow, keep_us) or _is_junk(name)
+                    pending.append((acct_name, typ, name, foreign))
+
+        def _rebaseline():
+            nb = {a: {"live": sorted(current[a]["live"]), "vod": sorted(current[a]["vod"])} for a in current}
+            gov["baseline"] = nb
+
+        report = {"mode": mode, "flipped_auto_add": flipped, "pending": len(pending), "enabled": 0}
+
+        if first_run:
+            _rebaseline()
+            gov["last_notified"] = []
+            self._write_gov(gov)
+            report["message"] = "Group-governance baseline established (%d live+vod groups); diffs start next run." % (
+                sum(len(t["live"]) + len(t["vod"]) for t in current.values())
+            )
+            return report
+
+        keep = [(a, t, n) for (a, t, n, f) in pending if not f]
+        skip = [(a, t, n) for (a, t, n, f) in pending if f]
+
+        if mode in ("auto", "approve") and keep:
+            for acct_name in {a for (a, _t, _n) in keep}:
+                acct = by_id.get(acct_name)
+                if not acct:
+                    continue
+                self._enable_groups(
+                    acct,
+                    [n for (a, t, n) in keep if a == acct_name and t == "live"],
+                    [n for (a, t, n) in keep if a == acct_name and t == "vod"],
+                )
+            report["enabled"] = len(keep)
+
+        if mode in ("auto", "approve", "dismiss"):
+            _rebaseline()  # both approve and dismiss "decide" all pending -> into baseline
+            gov["last_notified"] = []
+            self._write_gov(gov)
+            if do_reconcile and report["enabled"]:
+                try:
+                    self._run_job(dry_run=False, settings=dict(settings), mode="reconcile")
+                except Exception:
+                    logger.exception("failovarr governance reconcile failed")
+
+        # Notify: on scan/auto, only when the pending set changed since last notification.
+        sig = sorted("%s␟%s␟%s" % (a, t, n) for (a, t, n, _f) in pending)
+        if mode in ("scan", "auto"):
+            if sig and sig != gov.get("last_notified", []):
+                self._gotify_group_alert(settings, pending, mode, flipped)
+                gov["last_notified"] = sig
+                self._write_gov(gov)
+
+        report["message"] = self._format_gov(mode, pending, keep, skip, flipped, report["enabled"])
+        return report
+
+    def _gotify_group_alert(self, settings, pending, mode, flipped):
+        kept = [(a, t, n) for (a, t, n, f) in pending if not f]
+        forn = [(a, t, n) for (a, t, n, f) in pending if f]
+        lines = ["%d new provider group(s) past baseline." % len(pending)]
+        if kept:
+            verb = "auto-enabled" if mode == "auto" else "to approve"
+            lines.append("KEEP (%s): " % verb + ", ".join("%s/%s %s" % (a, t, n) for a, t, n in kept[:12]))
+        if forn:
+            lines.append("foreign/junk (ignored): " + ", ".join("%s/%s %s" % (a, t, n) for a, t, n in forn[:12]))
+        if flipped:
+            lines.append("(enforced auto-enable-new-groups OFF on: %s)" % ", ".join(flipped))
+        self._gotify_send(settings, "Failovarr 🆕 new groups", "\n".join(lines), 5)
+
+    def _format_gov(self, mode, pending, keep, skip, flipped, enabled):
+        parts = []
+        if flipped:
+            parts.append("enforced auto-add OFF on %s" % ", ".join(flipped))
+        parts.append("%d pending (%d keep, %d foreign/junk)" % (len(pending), len(keep), len(skip)))
+        if mode in ("auto", "approve"):
+            parts.append("enabled %d" % enabled)
+        elif mode == "dismiss":
+            parts.append("dismissed all pending (baselined, none enabled)")
+        return "Group governance: " + "; ".join(parts) + "."
+
     def _emergency_alert(self, settings, health):
         msg = (
             f"A Failovarr reconcile would have pruned {health.get('to_prune','?')} of "
@@ -2319,6 +2563,15 @@ class Plugin:
         changed = None
         try:
             logger.info("[Failovarr] scheduled reconcile firing (target %02d:%02d UTC)", *target)
+            # Group governance runs BEFORE the reconcile: in auto mode it enables kept new
+            # groups so the reconcile below folds them in (no double reconcile); in manual
+            # mode it just notifies. do_reconcile=False — the tick's own reconcile follows.
+            if bool(cfg.get("group_governance", False)):
+                try:
+                    gmode = "auto" if bool(cfg.get("group_governance_auto", False)) else "scan"
+                    self._group_governance(cfg, mode=gmode, do_reconcile=False)
+                except Exception:
+                    logger.exception("failovarr scheduled group-governance failed")
             report = self._run_job(dry_run=False, settings=cfg, mode="reconcile")
             ok = bool(report and report.get("status") == "done")
             message = (report or {}).get("message", "no report")

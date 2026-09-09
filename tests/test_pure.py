@@ -153,6 +153,21 @@ def test_country_prefix():
     assert fv._country_prefix("No Prefix Here") is None
 
 
+def test_group_is_foreign_region_aware():
+    RA = {"US", "EN"}
+    # home-market prefixes kept
+    assert fv._group_is_foreign("US| CNN HD", RA, True) is False
+    assert fv._group_is_foreign("EN| BBC", RA, True) is False
+    assert fv._group_is_foreign("AMAZON MOVIES", RA, True) is False  # no prefix -> kept
+    # denylisted foreign prefixes filtered
+    assert fv._group_is_foreign("DE| FOO", RA, True) is True
+    assert fv._group_is_foreign("AR| BAR", RA, True) is True
+    # non-Latin script is foreign regardless of prefix (e.g. an Arabic VOD category)
+    assert fv._group_is_foreign("مسلسلات كرتون للكبار", RA, True) is True
+    # region-aware (NOT US-hardcoded): add DE to the allowlist -> DE now kept
+    assert fv._group_is_foreign("DE| FOO", {"US", "EN", "DE"}, True) is False
+
+
 def test_is_junk():
     assert fv._is_junk("##### FOX WISCONSIN #####") is True
     assert fv._is_junk("## MAX ESPN ##") is True          # 2-hash divider

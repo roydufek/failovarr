@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.4.0
+
+- **Group governance — watch, notify, and approve new provider groups.** Providers add
+  new groups/VOD categories on every nightly refresh; with Dispatcharr's auto-enable now
+  off they arrive disabled, but you were then blind to what's new. Turn on **Group
+  governance** and the plugin snapshots your provider groups, flags anything new past its
+  baseline (classified **keep vs foreign/junk** using your *own* region filter — not
+  hardcoded to US), and Gotifies you. New groups stay disabled until you decide:
+  - **🔎 Check for new groups** — report what's pending, change nothing.
+  - **✅ Approve new groups** — enable the ones your region filter keeps, leave foreign/junk
+    disabled, and reconcile them in.
+  - **🚫 Dismiss new groups** — accept them into the baseline without enabling.
+  - **Auto mode** (opt-in) does the approve step automatically on the nightly run.
+  It also enforces the dependency it needs — auto-enable-new-groups stays OFF on your
+  provider accounts. Off by default; covers live groups + VOD/series categories.
+- **Fix:** the `=>` form of a group-alias separator was broken (the `=` matched first and
+  leaked `>` into the value); reordered so `A => B` works. Caught by the new unit tests.
+
 ## v0.3.2
 
 - **Much broader foreign-channel filter (backstop against creep).** The foreign-country

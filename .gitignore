@@ -8,3 +8,6 @@ backup_*.json
 keymap.json
 health.json
 dist/
+
+# Windows
+Thumbs.db

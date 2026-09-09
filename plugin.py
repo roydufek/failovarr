@@ -469,7 +469,7 @@ def _parse_group_aliases(raw):
     casing is kept verbatim so the user controls the resulting label."""
     out = {}
     for line in re.split(r"[\r\n,]+", raw or ""):
-        m = re.match(r"\s*(.+?)\s*(?:=|->|=>|:)\s*(.+?)\s*$", line)
+        m = re.match(r"\s*(.+?)\s*(?:->|=>|=|:)\s*(.+?)\s*$", line)
         if not m:
             continue
         frm, to = m.group(1).strip(), m.group(2).strip()

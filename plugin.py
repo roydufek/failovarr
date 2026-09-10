@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -202,6 +202,58 @@ _FOREIGN = {
     "CRB", "CR", "MA", "EU", "SL", "RS", "AZ", "SG", "HK", "SK", "MY", "PH", "SU",
     "SR", "SI", "KR", "AM", "KO", "LT", "EST", "BY", "UKR", "GE", "KA", "BAN", "NP",
     "AFG", "UZ", "TJ", "TH", "TAI", "VT", "BO", "VE", "VI", "KZ", "LV", "AG", "TN",
+    # 3-letter / provider-specific foreign prefixes (audit 2026-09-10): BEE = beIN
+    # (MENA/Arabic sports), BN = Bengali.
+    "BEE", "BN",
+}
+
+# Spelled-out country / nationality names that appear as the LEADING word of a group
+# (providers who don't use an "XX|" code — e.g. "DENMARK …", "GREECE NETFLIX",
+# "NORWAY …", "DE - …" bodies). Maps the name to its code so the region_allowlist still
+# governs it (a DE user keeps GERMANY; ENGLISH maps to EN so English shelves stay home).
+# Multi-word keys are matched on the first TWO leading words. Deliberately conservative —
+# only clear nation/nationality words, so ordinary titles aren't caught. English-speaking
+# nations (UK/AU/IE/NZ/CA) map to codes already in _FOREIGN, matching how the plugin
+# already treats their "XX|" forms; relax via region_allowlist to keep one.
+_FOREIGN_NAMES = {
+    "ENGLISH": "EN",  # home (language, not a foreign country) — protected by region_allow
+    "DENMARK": "DK", "DANSK": "DK", "DANSKE": "DK",
+    "FINLAND": "FI", "SUOMI": "FI",
+    "ICELAND": "IS",
+    "NORWAY": "NO", "NORSK": "NO", "NORGE": "NO",
+    "SWEDEN": "SE", "SVERIGE": "SE", "SVENSK": "SE",
+    "GREECE": "GR", "GREEK": "GR",
+    "GERMANY": "DE", "GERMAN": "DE", "DEUTSCH": "DE", "DEUTSCHLAND": "DE",
+    "FRANCE": "FR", "FRENCH": "FR", "FRANCAIS": "FR",
+    "SPAIN": "ES", "SPANISH": "ES", "ESPANA": "ES",
+    "ITALY": "IT", "ITALIAN": "IT", "ITALIA": "IT",
+    "PORTUGAL": "PT", "PORTUGUESE": "PT",
+    "TURKEY": "TR", "TURKISH": "TR", "TURKIYE": "TR",
+    "POLAND": "PL", "POLSKA": "PL", "POLISH": "PL",
+    "ROMANIA": "RO", "ROMANIAN": "RO",
+    "RUSSIA": "RU", "RUSSIAN": "RU",
+    "ALBANIA": "AL", "ALBANIAN": "AL", "SHQIP": "AL",
+    "BULGARIA": "BG", "BULGARIYA": "BG", "BULGARIAN": "BG",
+    "BELGIUM": "BE", "NETHERLANDS": "NL", "HOLLAND": "NL", "DUTCH": "NL",
+    "CHINA": "CN", "CHINESE": "CN",
+    "JAPAN": "JP", "JAPANESE": "JP",
+    "KOREA": "KR", "KOREAN": "KR",
+    "BRAZIL": "BR", "BRASIL": "BR",
+    "MEXICO": "MX", "ARGENTINA": "AR",
+    "INDIA": "IN", "HINDI": "IN", "PAKISTAN": "PK", "BENGALI": "BN",
+    "MOROCCO": "MA", "ALGERIA": "DZ", "TUNISIA": "TN",
+    "CROATIA": "HR", "HRVATSKA": "HR", "SERBIA": "RS", "HUNGARY": "HU", "HUNGARIAN": "HU",
+    "CZECH": "CZ", "SLOVAKIA": "SK", "SLOVENIA": "SI",
+    "AUSTRIA": "AT", "SWITZERLAND": "CH",
+    "UKRAINE": "UKR", "UKRAINIAN": "UKR", "ARMENIA": "AM", "AZERBAIJAN": "AZ",
+    "ESTONIA": "EST", "LATVIA": "LV", "LITHUANIA": "LT", "BELARUS": "BY",
+    "THAILAND": "TH", "VIETNAM": "VT", "INDONESIA": "ID", "PHILIPPINES": "PH",
+    "MALAYSIA": "MY", "SINGAPORE": "SG",
+    "IRELAND": "IE", "AUSTRALIA": "AU", "CANADA": "CA",
+    "AFRICA": "AFR", "AFRICAN": "AFR",
+    # two-word
+    "SOUTH AFRICA": "AFR", "SOUTH KOREA": "KR", "NEW ZEALAND": "NZ",
+    "UNITED KINGDOM": "UK", "SAUDI ARABIA": "SA",
 }
 
 # PPV/event parsing. Provider event streams pack status + matchup + time + package
@@ -235,6 +287,10 @@ _PPV_DATE = {
 # Prefix = everything before the first | or : (may carry a quality tag or spaces,
 # e.g. "AR 4K:" or "US|"). The leading alpha token is the country/region code.
 _PREFIX_RE = re.compile(r"^\s*([^|:]{1,24})[|:]\s*(.*)$")
+# Spaced-dash prefix form some providers use instead of a pipe, e.g. "DE - FILME",
+# "AF - IROKO TV". Ambiguous with ordinary content ("IN - DEPTH"), so a hit is only
+# treated as a country prefix when the token is a known foreign code (see _country_prefix).
+_DASH_PREFIX_RE = re.compile(r"^\s*([A-Za-z]{2,4})\s+-\s+")
 _LOCAL_RE = re.compile(r"\b(ABC|NBC|CBS|FOX)\b")
 _CALL_PAREN = re.compile(r"\(([WK][A-Z0-9]{2,4})\)")
 _CALL_BARE = re.compile(r"\b([WK][A-Z]{2,3})\b")
@@ -398,8 +454,35 @@ def _city_local_group(name):
 
 
 def _country_prefix(name):
-    ptoks, _ = _prefix_tokens(_fold(name))
-    return ptoks[0] if ptoks else None
+    """Leading country/region code, tolerant of the forms providers actually use:
+    `US|` / `US:` / `AR 4K:` (standard), `|DE|` (leading pipe), and `DE - …` (spaced
+    dash). The dash form is only accepted when the token is a known foreign code, since
+    a bare `WORD - …` is otherwise ordinary content."""
+    s = _fold(name or "")
+    # standard, and leading-pipe by stripping a leading '|' before the split
+    ptoks, _ = _prefix_tokens(s.lstrip("| "))
+    if ptoks:
+        return ptoks[0]
+    m = _DASH_PREFIX_RE.match(s)
+    if m:
+        tok = m.group(1).upper()
+        if tok in _FOREIGN:
+            return tok
+    return None
+
+
+def _spelled_country(name):
+    """A spelled-out country/nationality name used as the LEADING word(s) -> its code,
+    else None. First one/two words only, so 'SOUTH CHINA SEA DOC' doesn't match CHINA."""
+    s = _fold(name or "").lstrip("| ")
+    words = re.findall(r"[A-Za-z]+", s.upper())
+    if not words:
+        return None
+    if len(words) > 1:
+        two = words[0] + " " + words[1]
+        if two in _FOREIGN_NAMES:
+            return _FOREIGN_NAMES[two]
+    return _FOREIGN_NAMES.get(words[0])
 
 
 def _is_non_latin(name):
@@ -424,7 +507,16 @@ def _group_is_foreign(name, region_allow, keep_us_market):
     protected = keep_us_market and cp in region_allow
     if protected:
         return False
-    return bool(cp and cp in _FOREIGN) or _is_non_latin(name)
+    if cp and cp in _FOREIGN:
+        return True
+    if _is_non_latin(name):
+        return True
+    # Spelled-out country name (no code prefix) — still region-aware: a home nation
+    # (e.g. ENGLISH -> EN) in region_allow is kept; anything else is foreign.
+    code = _spelled_country(name)
+    if code:
+        return not (keep_us_market and code in region_allow)
+    return False
 
 
 # Quality-tier rank for intra-provider stream ordering (lower is tried first, so a
@@ -728,7 +820,7 @@ class Plugin:
             "label": "🚫 Dismiss new groups",
             "description": "Group governance: accept all pending new groups into the baseline WITHOUT enabling any — they stop being flagged and stay disabled.",
             "button_label": "Dismiss new",
-            "button_variant": "subtle",
+            "button_variant": "outline",
         },
         {
             "id": "seed_reset",
@@ -1516,12 +1608,9 @@ class Plugin:
                 if cfg["skip_junk"] and _is_junk(name):
                     stats["skip_junk"] += 1
                     continue
-                if cfg["filter_foreign"]:
-                    cp = _country_prefix(name)
-                    protected = cfg["keep_us_market"] and cp in region_allow
-                    if not protected and (cp in _FOREIGN or _is_non_latin(name)):
-                        stats["skip_foreign"] += 1
-                        continue
+                if cfg["filter_foreign"] and _group_is_foreign(name, region_allow, cfg["keep_us_market"]):
+                    stats["skip_foreign"] += 1
+                    continue
 
                 is_adult = bool(s_adult) or bool(adult_re and adult_re.search(gname))
 

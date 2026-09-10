@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.4.2
+
+- **Foreign classifier now understands the naming forms providers actually use.** The
+  filter only recognized the `XX|` / `XX:` prefix (plus non-Latin script), so foreign
+  groups written as `|DE| …` (leading pipe), `DE - …` (spaced dash), or spelled out
+  (`DENMARK …`, `GREECE NETFLIX`, `NORWAY …`) sailed through as "keep" — cosmetic for
+  live (channels were filtered anyway) but real for VOD (foreign categories leaked), and
+  unsafe for governance **auto mode** (it would auto-enable them). Now:
+  - `_country_prefix` also reads `|XX|` and `XX - ` forms (the dash form only when the
+    token is a known foreign code, so ordinary titles like `IN - DEPTH` aren't caught).
+  - a spelled-out country/nationality map (`GERMANY`, `GREECE`, `NORWAY`, …) matches the
+    leading word; `ENGLISH` maps to the home region so English shelves stay kept.
+  - added `BEE` (beIN) and `BN` (Bengali) to the prefix denylist.
+  - all of it stays **region-aware** — `region_allowlist` + *keep US-market* still decide
+    keep-vs-drop, so a non-US user's own region is protected in every form too.
+- **One classifier, one source of truth.** The live-stream foreign filter used to inline
+  its own copy of the test; it now calls the same `_group_is_foreign` helper as VOD and
+  governance, so the three can't drift apart.
+- **UI:** the **Dismiss new groups** action is now a bordered button (was a plain
+  text-link).
+
 ## v0.4.1
 
 - **Fix: the group-governance action buttons never appeared.** The three governance

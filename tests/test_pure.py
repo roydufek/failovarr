@@ -168,6 +168,54 @@ def test_group_is_foreign_region_aware():
     assert fv._group_is_foreign("DE| FOO", {"US", "EN", "DE"}, True) is False
 
 
+def test_group_is_foreign_alt_naming_forms():
+    RA = {"US", "EN"}
+    F = lambda n: fv._group_is_foreign(n, RA, True)  # noqa: E731
+    # leading-pipe form
+    assert F("|DE| ANIME FILME") is True
+    assert F("|AR| TABII") is True
+    assert F("|EN| 4K MOVIES") is False          # EN = home
+    # spaced-dash form (accepted only for known codes)
+    assert F("DE - FILME 2025/2026") is True
+    assert F("AF - IROKO TV") is True
+    assert F("BN - BENGALI") is True
+    assert F("EN - COMEDY") is False             # EN = home
+    assert F("SPORTS - EXTRA") is False          # non-code word is NOT a prefix
+    # spelled-out country as the leading word
+    assert F("DENMARK SPORT HD") is True
+    assert F("GREECE NETFLIX") is True
+    assert F("NORWAY GOLD RAW") is True
+    assert F("CHINA ANIMATION") is True
+    assert F("SOUTH AFRICA SERIES") is True      # two-word key
+    assert F("ENGLISH SERIES") is False          # language, not a foreign country
+    # BEE (beIN) denylist prefix
+    assert F("BEE| AL KASS") is True
+
+
+def test_group_is_foreign_no_false_positives():
+    """US/English content must never read as foreign (would block auto-enable)."""
+    RA = {"US", "EN"}
+    F = lambda n: fv._group_is_foreign(n, RA, True)  # noqa: E731
+    for n in (
+        "US| CNN HD", "NETFLIX MOVIES", "DISNEY+ KIDS", "APPLE+ MOVIES",
+        "HBO MAX SERIES", "PARAMOUNT+", "SOCCER FOOTBALL", "MARVEL MOVIES (MULTI)",
+        "24/7 COMEDY VIP", "RATED R", "TOP IMDB/OSCAR MOVIES", "FORMULA 1 + MOTO GP",
+        "|EN| NETFLIX", "EN - KIDS", "ENGLISH REALITY SERIES", "FOR ADULTS",
+        "4K RELAX UHD 3840P", "Default Group", "Uncategorized",
+    ):
+        assert F(n) is False, n
+
+
+def test_group_is_foreign_region_relax_all_forms():
+    """A DE user keeps German content in every naming form; AR stays foreign."""
+    RA = {"US", "EN", "DE"}
+    F = lambda n: fv._group_is_foreign(n, RA, True)  # noqa: E731
+    assert F("|DE| ANIME") is False
+    assert F("DE - FILME") is False
+    assert F("GERMANY DOKU SERIEN") is False
+    assert F("|AR| TABII") is True
+
+
 def test_is_junk():
     assert fv._is_junk("##### FOX WISCONSIN #####") is True
     assert fv._is_junk("## MAX ESPN ##") is True          # 2-hash divider

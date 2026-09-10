@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -698,6 +698,37 @@ class Plugin:
             "description": "With 'PPV events' ON: build/update live PPV event channels with failover and remove ended ones. With it OFF: remove all PPV channels (clean off-switch).",
             "button_label": "Refresh PPV",
             "button_variant": "filled",
+        },
+        {
+            "id": "scan_groups",
+            "label": "🔎 Check for new groups",
+            "description": "Group governance: report provider groups/VOD categories added since the baseline, classified keep/foreign, and Gotify if the set changed. Changes nothing. (Requires 'Group governance' on.)",
+            "button_label": "Check groups",
+            "button_variant": "outline",
+        },
+        {
+            "id": "approve_new_groups",
+            "label": "✅ Approve new groups",
+            "description": "Group governance: enable the new groups your foreign filter would KEEP (region-aware), leave foreign/junk disabled, accept all pending into the baseline, and reconcile so the kept channels flow in.",
+            "button_label": "Approve new",
+            "button_variant": "filled",
+            "confirm": {
+                "required": True,
+                "title": "Approve new groups?",
+                "message": (
+                    "Enables the pending new groups your region filter keeps "
+                    "(foreign/junk stay disabled), commits all pending to the "
+                    "baseline, and runs a reconcile to bring the kept channels in. "
+                    "Proceed?"
+                ),
+            },
+        },
+        {
+            "id": "dismiss_new_groups",
+            "label": "🚫 Dismiss new groups",
+            "description": "Group governance: accept all pending new groups into the baseline WITHOUT enabling any — they stop being flagged and stay disabled.",
+            "button_label": "Dismiss new",
+            "button_variant": "subtle",
         },
         {
             "id": "seed_reset",

@@ -143,6 +143,50 @@ providers** into one failover channel so it doesn't drop mid-event.
 **Refresh PPV events** is a clean on/off switch: with PPV events **on** it builds the
 event channels; with it **off** it removes them all.
 
+## Group governance
+
+*Opt-in — off by default.* Providers add new category groups (and VOD categories) on
+almost every nightly refresh — usually foreign, occasionally a new US shelf worth
+having. Dispatcharr's own **auto-enable new groups** defaults *on*, so those silently
+went live (that's how a stray `AFR| CABO VERDE` shelf appears). Turn on **Group
+governance** to flip that model: new groups arrive **disabled**, and the plugin
+watches, classifies, and notifies so you *opt in* instead of cleaning up after a leak.
+
+- **Enforces the safe default.** While governance is on, each run forces Dispatcharr's
+  `auto-enable new groups` (live / VOD / series) **off** on every provider account — so
+  new groups can't go live behind your back. You don't have to set it yourself.
+- **Baseline.** The first run records every current group as the baseline (no noise).
+  From then on it only ever looks at **new group names not in that baseline** — the
+  *diff*. It never re-examines groups it already knows about.
+- **Classify + notify.** Each new group is labelled **keep** or **foreign/junk** using
+  *your own* foreign filter — `region_allowlist` + **Always keep US-market** + the
+  built-in foreign-prefix / non-Latin-script test — so the verdict follows your region,
+  it is **not** hardcoded to the US. A Gotify fires once per change (no daily spam).
+- **You decide** with three actions — **Check for new groups** (report only, changes
+  nothing), **Approve new groups** (enable the ones the filter keeps, record the rest as
+  seen, and reconcile the kept channels in), **Dismiss new groups** (accept them all
+  into the baseline without enabling anything). Or turn on **↳ Auto mode** to auto-enable
+  the kept groups and reconcile on every run, hands-off.
+
+**Governance only ever *enables* — it never disables a group.** Approve/Auto set groups
+to enabled; Dismiss just records them as seen. Nothing here (or anywhere in the plugin)
+turns a group off. So a group you enabled by hand in Dispatcharr is safe: it's already
+in the baseline, so governance ignores it, and even a brand-new one is only ever
+*enabled or left as-is* — never clawed back.
+
+### Keeping a foreign region on purpose
+
+If you *want* a region the foreign filter would normally drop (say you're in Germany, or
+want a specific `DE|` shelf), the real lever is **Region prefixes to strip**
+(`region_allowlist`) — add the prefix there (e.g. `US, EN, DE`). That does two things at
+once: it protects those channels from the foreign filter (so they actually populate) and
+strips the prefix from the matching key so the same channel pairs across providers.
+
+Enabling the *group* alone is not enough: the foreign filter runs at the **channel**
+level on every reconcile, so a `DE|` group you enable without allowlisting `DE` will show
+up **empty** — its channels get dropped as foreign. Add `DE` to the allowlist and they
+flow in. (Governance won't fight you either way — see above; it never disables.)
+
 ## Install
 
 **Via plugin repo (recommended):** In Dispatcharr go to **Plugins → Repos → Add
@@ -221,6 +265,13 @@ After installing, enable Failovarr and configure:
 **EPG**
 - **Match EPG guide + logos** · **Respect manual EPG mappings**.
 
+**Group governance** (see [Group governance](#group-governance))
+- **Group governance** — watch for new provider groups/VOD categories, keep them
+  disabled, and classify + notify (Gotify) so you approve instead of leaking. Enforces
+  Dispatcharr's *auto-enable new groups* off. Off = dormant.
+- **↳ Auto mode** — auto-enable the new groups your foreign filter keeps and reconcile
+  them in, every run. Off = manual (you approve via the action buttons).
+
 **Schedule & notifications**
 - **Daily reconcile time (HH:MM, UTC)** — blank disables. Reconcile only, never wipes.
 - **Gotify** — off / on-failure / **on-change** / on-completion; set server URL + token.
@@ -259,6 +310,13 @@ lineups (`plex`, `kids`, `sports`…) and add each as its own tuner. The M3U var
 - **Match EPG + logos** — map channels to guide entries and refresh, on its own.
 - **Preview PPV events** / **Refresh PPV events** — dry-run / build live PPV channels
   (or remove them all when PPV events is off).
+- **Check for new groups** — report provider groups/VOD categories added since the
+  baseline, classified keep/foreign, and Gotify if the set changed. Changes nothing.
+- **Approve new groups** — enable the pending new groups your foreign filter keeps
+  (foreign/junk stay disabled), record them all into the baseline, and reconcile the
+  kept channels in.
+- **Dismiss new groups** — accept all pending new groups into the baseline *without*
+  enabling any (they stop being flagged and stay disabled).
 - **Seed / reset** — delete all Failovarr-owned channels and rebuild from scratch (for
   the initial build or a deliberate clean re-seed only).
 - **View last results** · **Clear operation lock**.

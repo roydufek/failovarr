@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.1
+
+- **Fix: the group-governance action buttons never appeared.** The three governance
+  actions (**Check for new groups** / **Approve new groups** / **Dismiss new groups**)
+  were added to `plugin.json` in v0.4.0 but not to the `actions` list in `plugin.py` —
+  and Dispatcharr renders the action buttons from the plugin class, so they were
+  invisible in the UI. The `run()` handlers were already wired; this just surfaces the
+  buttons. Governance now fully drivable by hand (scan/auto were unaffected).
+
 ## v0.4.0
 
 - **Group governance — watch, notify, and approve new provider groups.** Providers add

@@ -216,6 +216,21 @@ def test_group_is_foreign_region_relax_all_forms():
     assert F("|AR| TABII") is True
 
 
+def test_govt_list():
+    # under the cap: all shown, no tail
+    items = [("trex", "live", "US| A"), ("strong", "vod", "EN - B")]
+    s = fv._govt_list(items, cap=5)
+    assert "trex/live US| A" in s and "strong/vod EN - B" in s
+    assert "more" not in s
+    # over the cap: exactly `cap` shown + honest overflow tail
+    many = [("t", "live", "G%d" % i) for i in range(10)]
+    s2 = fv._govt_list(many, cap=3)
+    assert s2.count(",") == 2           # 3 items -> 2 separators
+    assert "(+7 more)" in s2
+    # default cap is generous (>= 100)
+    assert fv._GOV_LIST_CAP >= 100
+
+
 def test_is_junk():
     assert fv._is_junk("##### FOX WISCONSIN #####") is True
     assert fv._is_junk("## MAX ESPN ##") is True          # 2-hash divider

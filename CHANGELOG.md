@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.3
+
+- **Governance notifications/reports now list *all* the groups, not just the first 12.**
+  The Gotify alert capped the keep and foreign/junk lists at 12 names each, so on a busy
+  day you couldn't see everything that was accepted/ignored (and the count in the header
+  looked off versus the shorter list). The cap is now a generous 100 per category with an
+  honest `…(+N more)` tail, and each list is labelled with its true count (`KEEP [14]:`,
+  `foreign/junk (ignored) [14]:`). The on-screen **Check for new groups** / Approve /
+  Dismiss report now lists the group names too (same generous cap), so it's a real
+  accept/ignore review surface, not just counts.
+
 ## v0.4.2
 
 - **Foreign classifier now understands the naming forms providers actually use.** The

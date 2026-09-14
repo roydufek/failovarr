@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -548,6 +548,20 @@ def _is_junk(name):
     if _PPV_IDLE.search(n):
         return True
     return False
+
+
+# Governance review surfaces (Gotify + Check report) list group names so you can
+# actually audit accept/ignore. Cap is generous — a full monitor, not a teaser — with
+# an honest "(+N more)" tail so a pathological churn can't produce a giant message.
+_GOV_LIST_CAP = 100
+
+
+def _govt_list(items, cap=_GOV_LIST_CAP):
+    """Join 'acct/type name' triples for a governance report, capped with an honest tail."""
+    shown = ", ".join("%s/%s %s" % (a, t, n) for a, t, n in items[:cap])
+    if len(items) > cap:
+        shown += "  …(+%d more)" % (len(items) - cap)
+    return shown
 
 
 def _display_name(name, region_allow):
@@ -2521,9 +2535,9 @@ class Plugin:
         lines = ["%d new provider group(s) past baseline." % len(pending)]
         if kept:
             verb = "auto-enabled" if mode == "auto" else "to approve"
-            lines.append("KEEP (%s): " % verb + ", ".join("%s/%s %s" % (a, t, n) for a, t, n in kept[:12]))
+            lines.append("KEEP (%s) [%d]: %s" % (verb, len(kept), _govt_list(kept)))
         if forn:
-            lines.append("foreign/junk (ignored): " + ", ".join("%s/%s %s" % (a, t, n) for a, t, n in forn[:12]))
+            lines.append("foreign/junk (ignored) [%d]: %s" % (len(forn), _govt_list(forn)))
         if flipped:
             lines.append("(enforced auto-enable-new-groups OFF on: %s)" % ", ".join(flipped))
         self._gotify_send(settings, "Failovarr 🆕 new groups", "\n".join(lines), 5)
@@ -2537,7 +2551,12 @@ class Plugin:
             parts.append("enabled %d" % enabled)
         elif mode == "dismiss":
             parts.append("dismissed all pending (baselined, none enabled)")
-        return "Group governance: " + "; ".join(parts) + "."
+        out = "Group governance: " + "; ".join(parts) + "."
+        if keep:
+            out += "\nKEEP: " + _govt_list(keep)
+        if skip:
+            out += "\nforeign/junk: " + _govt_list(skip)
+        return out
 
     def _emergency_alert(self, settings, health):
         msg = (

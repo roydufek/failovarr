@@ -216,17 +216,19 @@ def test_group_is_foreign_region_relax_all_forms():
     assert F("|AR| TABII") is True
 
 
-def test_govt_list():
-    # under the cap: all shown, no tail
+def test_govt_block():
+    # header carries the true count; one bullet line per item; no tail under the cap
     items = [("trex", "live", "US| A"), ("strong", "vod", "EN - B")]
-    s = fv._govt_list(items, cap=5)
-    assert "trex/live US| A" in s and "strong/vod EN - B" in s
-    assert "more" not in s
-    # over the cap: exactly `cap` shown + honest overflow tail
+    lines = fv._govt_block("KEEP", items, cap=5)
+    assert lines[0] == "KEEP — 2:"
+    assert any("trex/live US| A" in l for l in lines)
+    assert not any("more" in l for l in lines)
+    # over the cap: exactly `cap` bullet lines + honest overflow tail
     many = [("t", "live", "G%d" % i) for i in range(10)]
-    s2 = fv._govt_list(many, cap=3)
-    assert s2.count(",") == 2           # 3 items -> 2 separators
-    assert "(+7 more)" in s2
+    l2 = fv._govt_block("X", many, cap=3)
+    assert l2[0] == "X — 10:"
+    assert len([l for l in l2 if l.lstrip().startswith("•")]) == 3
+    assert any("(+7 more)" in l for l in l2)
     # default cap is generous (>= 100)
     assert fv._GOV_LIST_CAP >= 100
 

@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -554,14 +554,20 @@ def _is_junk(name):
 # actually audit accept/ignore. Cap is generous — a full monitor, not a teaser — with
 # an honest "(+N more)" tail so a pathological churn can't produce a giant message.
 _GOV_LIST_CAP = 100
+# Gotify handles long messages fine, so notifications are formatted multi-line and only
+# clipped at a generous ceiling (a safety valve against a pathological payload).
+_GOTIFY_MSG_MAX = 7000
 
 
-def _govt_list(items, cap=_GOV_LIST_CAP):
-    """Join 'acct/type name' triples for a governance report, capped with an honest tail."""
-    shown = ", ".join("%s/%s %s" % (a, t, n) for a, t, n in items[:cap])
+def _govt_block(label, items, cap=_GOV_LIST_CAP):
+    """Multi-line block for a governance report/notification: a 'label — N:' header, then
+    one '  • acct/type name' per line (capped, with an honest '…(+N more)' tail). Returns
+    a list of lines to join with newlines — readable in Gotify and the on-screen report."""
+    lines = ["%s — %d:" % (label, len(items))]
+    lines += ["  • %s/%s %s" % (a, t, n) for a, t, n in items[:cap]]
     if len(items) > cap:
-        shown += "  …(+%d more)" % (len(items) - cap)
-    return shown
+        lines.append("  …(+%d more)" % (len(items) - cap))
+    return lines
 
 
 def _display_name(name, region_allow):
@@ -2535,10 +2541,13 @@ class Plugin:
         lines = ["%d new provider group(s) past baseline." % len(pending)]
         if kept:
             verb = "auto-enabled" if mode == "auto" else "to approve"
-            lines.append("KEEP (%s) [%d]: %s" % (verb, len(kept), _govt_list(kept)))
+            lines.append("")
+            lines += _govt_block("KEEP (%s)" % verb, kept)
         if forn:
-            lines.append("foreign/junk (ignored) [%d]: %s" % (len(forn), _govt_list(forn)))
+            lines.append("")
+            lines += _govt_block("foreign/junk (ignored)", forn)
         if flipped:
+            lines.append("")
             lines.append("(enforced auto-enable-new-groups OFF on: %s)" % ", ".join(flipped))
         self._gotify_send(settings, "Failovarr 🆕 new groups", "\n".join(lines), 5)
 
@@ -2551,12 +2560,14 @@ class Plugin:
             parts.append("enabled %d" % enabled)
         elif mode == "dismiss":
             parts.append("dismissed all pending (baselined, none enabled)")
-        out = "Group governance: " + "; ".join(parts) + "."
+        lines = ["Group governance: " + "; ".join(parts) + "."]
         if keep:
-            out += "\nKEEP: " + _govt_list(keep)
+            lines.append("")
+            lines += _govt_block("KEEP", keep)
         if skip:
-            out += "\nforeign/junk: " + _govt_list(skip)
-        return out
+            lines.append("")
+            lines += _govt_block("foreign/junk", skip)
+        return "\n".join(lines)
 
     def _emergency_alert(self, settings, health):
         msg = (
@@ -2574,27 +2585,34 @@ class Plugin:
 
     # --------------------------------------------------------------- reporting
     def _format_report(self, data):
-        s = data.get("stats", {})
+        s = data.get("stats", {}) or {}
         lines = [
             f"[{data.get('status','?')}{' / dry-run' if data.get('dry_run') else ''} / {data.get('mode','?')}] "
-            f"{data.get('message','')}",
+            f"{data.get('message','')}"
         ]
-        if s:
-            lines.append(
-                f"streams: {s.get('streams_scanned','?')} scanned "
-                f"(skipped {s.get('streams_skipped_event','?')} event, "
-                f"{s.get('streams_skipped_foreign','?')} foreign, "
-                f"{s.get('streams_skipped_junk','?')} junk)"
-            )
-            lines.append(
-                f"channels: {s.get('keys_total','?')} total "
-                f"({s.get('failover_pairs','?')} pairs, {s.get('single_source','?')} single, "
-                f"{s.get('adult','?')} adult, {s.get('locals_by_callsign','?')} locals)"
-            )
-            lines.append(
-                f"changes: +{s.get('created', s.get('channels_to_create','?'))} "
-                f"~{s.get('updated','?')} -{s.get('pruned', s.get('channels_to_prune','?'))}"
-            )
+        # Each stat row is emitted only when its data is actually present, so a PPV run
+        # (which doesn't track skip/adult/locals) doesn't print rows full of "?".
+        if "streams_scanned" in s:
+            skipped = [f"{s[k]} {lbl}" for k, lbl in (
+                ("streams_skipped_event", "event"),
+                ("streams_skipped_foreign", "foreign"),
+                ("streams_skipped_junk", "junk"),
+            ) if k in s]
+            tail = f" (skipped {', '.join(skipped)})" if skipped else ""
+            lines.append(f"streams: {s['streams_scanned']} scanned{tail}")
+        ch = []
+        for key, lbl in (("keys_total", "total"), ("failover_pairs", "pairs"),
+                         ("single_source", "single"), ("adult", "adult"),
+                         ("locals_by_callsign", "locals")):
+            if key in s:
+                ch.append(f"{s[key]} {lbl}")
+        if ch:
+            lines.append("channels: " + ", ".join(ch))
+        created = s.get("created", s.get("channels_to_create"))
+        updated = s.get("updated")
+        pruned = s.get("pruned", s.get("channels_to_prune"))
+        if any(v is not None for v in (created, updated, pruned)):
+            lines.append(f"changes: +{created or 0} ~{updated or 0} -{pruned or 0}")
         e = data.get("epg")
         if e:
             srcs = e.get("sources") or ([e.get("source")] if e.get("source") else [])
@@ -2618,7 +2636,7 @@ class Plugin:
         if not url:
             return
         try:
-            data = urllib.parse.urlencode({"title": title, "message": message[:1800], "priority": priority}).encode()
+            data = urllib.parse.urlencode({"title": title, "message": message[:_GOTIFY_MSG_MAX], "priority": priority}).encode()
             req = urllib.request.Request(url, data=data, method="POST")
             urllib.request.urlopen(req, timeout=10).read()
         except Exception:
@@ -2698,7 +2716,7 @@ class Plugin:
         self._write_attempt(att)
         self._cancel.clear()
         ok = False
-        message = ""
+        notify_body = ""
         changed = None
         try:
             logger.info("[Failovarr] scheduled reconcile firing (target %02d:%02d UTC)", *target)
@@ -2713,16 +2731,18 @@ class Plugin:
                     logger.exception("failovarr scheduled group-governance failed")
             report = self._run_job(dry_run=False, settings=cfg, mode="reconcile")
             ok = bool(report and report.get("status") == "done")
-            message = (report or {}).get("message", "no report")
             st = (report or {}).get("stats", {}) or {}
             changed = (st.get("created", 0) or 0) + (st.get("updated", 0) or 0) + (st.get("pruned", 0) or 0)
+            # Full multi-line report in the notification (not just the one-line summary).
+            notify_body = self._format_report(report) if report else "no report"
             # Refresh PPV events once, right after the daily reconcile — a once-a-day
             # client only sees a daily snapshot anyway, and failover works at playback
             # without a refresh. (Intra-day cadence is opt-in via _ppv_tick.)
             if ok and bool(cfg.get("ppv_events", False)):
                 try:
                     prep = self._ppv_job(dry_run=False, settings=cfg)
-                    message += f" | {(prep or {}).get('message', 'PPV done')}"
+                    if prep:
+                        notify_body += "\n\n" + self._format_report(prep)
                 except Exception:
                     logger.exception("failovarr daily PPV refresh failed")
             if ok:
@@ -2731,11 +2751,11 @@ class Plugin:
         except Exception as exc:
             logger.exception("failovarr scheduled run failed")
             ok = False
-            message = f"{exc}"
+            notify_body = f"Reconcile failed:\n{exc}"
         finally:
             close_old_connections()
             self._release_lock()
-            self._notify_gotify(cfg, ok, message, changed)
+            self._notify_gotify(cfg, ok, notify_body, changed)
 
     def _ppv_tick(self, cfg):
         """OPTIONAL intra-day PPV refresh, for clients that pull the playlist more than

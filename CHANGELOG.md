@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.4
+
+- **Notifications are now multi-line and easy to read.** Gotify handles long messages, so
+  every notification is laid out over lines instead of crammed onto one:
+  - The **scheduled reconcile** Gotify now sends the *full* report (streams / channels /
+    changes / EPG / health / backup, each on its own line) instead of just the one-line
+    summary.
+  - **New-groups** alerts and the on-screen **Check / Approve / Dismiss** report list one
+    group per line under `KEEP — N:` / `foreign/junk — N:` headers (generous 100-per-list
+    cap with an honest `…(+N more)`), instead of a single comma-crammed line.
+  - The Gotify message cap was raised from 1800 to 7000 chars so those lists aren't cut off.
+- **Cleaner "View last results" for PPV.** The report formatter now emits each stat row
+  only when that data exists, so a PPV run no longer prints rows full of `?` for
+  reconcile-only stats (skipped event/foreign/junk, total, adult, locals).
+
 ## v0.4.3
 
 - **Governance notifications/reports now list *all* the groups, not just the first 12.**

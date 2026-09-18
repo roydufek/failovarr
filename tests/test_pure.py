@@ -233,6 +233,37 @@ def test_govt_block():
     assert fv._GOV_LIST_CAP >= 100
 
 
+def test_format_report_ppv_sections():
+    data = {"status": "done", "mode": "ppv",
+            "message": "PPV: 322 events added, 461 updated, 295 ended/removed",
+            "stats": {"streams_scanned": 6174, "failover_pairs": 296, "single_source": 789,
+                      "created": 322, "updated": 461, "pruned": 295}}
+    out = fv.Plugin._format_report(None, data)
+    ls = out.splitlines()
+    assert ls[0] == "PPV events — done"
+    assert "Events" in ls and "  • 322 added" in ls
+    assert "Live now" in ls and "  • 1085 total" in ls   # derived pairs+single
+    assert "?" not in out                                 # no reconcile-only ? rows
+    # no bullet joins two metrics with a bare comma (parenthetical commas are fine)
+    for ln in ls:
+        if ln.lstrip().startswith("•"):
+            import re as _re
+            assert ", " not in _re.sub(r"\(.*?\)", "", ln)
+
+
+def test_format_report_reconcile_sections():
+    data = {"status": "done", "mode": "reconcile", "backup": "/x/b.json",
+            "stats": {"streams_scanned": 100, "streams_skipped_foreign": 5, "keys_total": 80,
+                      "failover_pairs": 30, "single_source": 50, "created": 1, "updated": 2, "pruned": 0},
+            "epg": {"matched": 10, "sources": ["a", "b"]}, "health": {"existing": 80, "to_prune": 0}}
+    out = fv.Plugin._format_report(None, data)
+    ls = out.splitlines()
+    assert ls[0] == "Reconcile — done"
+    assert "  • 100 scanned" in ls and "  • 5 skipped (foreign)" in ls
+    assert "  • +1 added" in ls and "  • -0 pruned" in ls
+    assert "EPG" in ls and "Health" in ls and "Backup" in ls
+
+
 def test_is_junk():
     assert fv._is_junk("##### FOX WISCONSIN #####") is True
     assert fv._is_junk("## MAX ESPN ##") is True          # 2-hash divider

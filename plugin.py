@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -2585,44 +2585,83 @@ class Plugin:
 
     # --------------------------------------------------------------- reporting
     def _format_report(self, data):
+        """Sectioned, one-metric-per-line report — reads cleanly in Gotify and the
+        View-last panel. Built from the stats dict (not a comma-run-on sentence), and
+        mode-aware so a PPV run labels its own numbers. Each row is emitted only when its
+        value exists, so nothing prints as '?'. """
+        mode = data.get("mode", "?")
+        tag = " · dry-run" if data.get("dry_run") else ""
+        title = {
+            "reconcile": "Reconcile", "seed": "Seed / reset",
+            "ppv": "PPV events", "epg": "EPG match",
+        }.get(mode, str(mode).title())
+        lines = ["%s — %s%s" % (title, data.get("status", "?"), tag)]
         s = data.get("stats", {}) or {}
-        lines = [
-            f"[{data.get('status','?')}{' / dry-run' if data.get('dry_run') else ''} / {data.get('mode','?')}] "
-            f"{data.get('message','')}"
-        ]
-        # Each stat row is emitted only when its data is actually present, so a PPV run
-        # (which doesn't track skip/adult/locals) doesn't print rows full of "?".
-        if "streams_scanned" in s:
-            skipped = [f"{s[k]} {lbl}" for k, lbl in (
-                ("streams_skipped_event", "event"),
-                ("streams_skipped_foreign", "foreign"),
-                ("streams_skipped_junk", "junk"),
-            ) if k in s]
-            tail = f" (skipped {', '.join(skipped)})" if skipped else ""
-            lines.append(f"streams: {s['streams_scanned']} scanned{tail}")
-        ch = []
-        for key, lbl in (("keys_total", "total"), ("failover_pairs", "pairs"),
-                         ("single_source", "single"), ("adult", "adult"),
-                         ("locals_by_callsign", "locals")):
-            if key in s:
-                ch.append(f"{s[key]} {lbl}")
-        if ch:
-            lines.append("channels: " + ", ".join(ch))
-        created = s.get("created", s.get("channels_to_create"))
-        updated = s.get("updated")
-        pruned = s.get("pruned", s.get("channels_to_prune"))
-        if any(v is not None for v in (created, updated, pruned)):
-            lines.append(f"changes: +{created or 0} ~{updated or 0} -{pruned or 0}")
+
+        def section(header, rows):
+            rows = [(v, l) for (v, l) in rows if v is not None]
+            if not rows:
+                return
+            lines.append("")
+            lines.append(header)
+            for v, l in rows:
+                lines.append(("  • %s %s" % (v, l)).rstrip())
+
+        if mode == "ppv":
+            section("Events", [
+                (s.get("created"), "added"),
+                (s.get("updated"), "updated"),
+                (s.get("pruned"), "ended / removed"),
+            ])
+            pairs, single = s.get("failover_pairs"), s.get("single_source")
+            total = (pairs or 0) + (single or 0) if (pairs is not None or single is not None) else None
+            section("Live now", [
+                (total, "total"),
+                (pairs, "failover pairs"),
+                (single, "single-source"),
+            ])
+        else:
+            section("Streams", [
+                (s.get("streams_scanned"), "scanned"),
+                (s.get("streams_skipped_event"), "skipped (event)"),
+                (s.get("streams_skipped_foreign"), "skipped (foreign)"),
+                (s.get("streams_skipped_junk"), "skipped (junk)"),
+            ])
+            section("Channels", [
+                (s.get("keys_total"), "total"),
+                (s.get("failover_pairs"), "failover pairs"),
+                (s.get("single_source"), "single-source"),
+                (s.get("adult"), "adult"),
+                (s.get("locals_by_callsign"), "locals"),
+            ])
+            created = s.get("created", s.get("channels_to_create"))
+            updated = s.get("updated")
+            pruned = s.get("pruned", s.get("channels_to_prune"))
+            section("Changes", [
+                (("+%s" % created) if created is not None else None, "added"),
+                (("~%s" % updated) if updated is not None else None, "updated"),
+                (("-%s" % pruned) if pruned is not None else None, "pruned"),
+            ])
+
         e = data.get("epg")
         if e:
             srcs = e.get("sources") or ([e.get("source")] if e.get("source") else [])
-            lines.append(f"epg: {e.get('matched','?')} mapped (sources: {', '.join(srcs) or '?'})")
+            src = (" (%s)" % ", ".join(srcs)) if srcs else ""
+            section("EPG", [("%s mapped%s" % (e.get("matched", "?"), src), "")])
+
         h = data.get("health")
         if h:
-            flag = " ⚠️ COLLAPSE — prune blocked" if h.get("collapse") else ""
-            lines.append(f"health: {h.get('existing','?')} owned, {h.get('to_prune','?')} would prune{flag}")
+            section("Health", [(h.get("existing"), "owned"), (h.get("to_prune"), "would prune")])
+            if h.get("collapse"):
+                lines.append("  ⚠️ COLLAPSE — prune blocked")
+
         if data.get("backup"):
-            lines.append(f"backup: {data['backup']}")
+            section("Backup", [(data["backup"], "")])
+
+        # Fallback: nothing structured (e.g. a plain/error report) — show the message so
+        # the notification is never just a bare header line.
+        if len(lines) == 1 and data.get("message"):
+            lines += ["", data["message"]]
         return "\n".join(lines)
 
     # --------------------------------------------------------------- gotify

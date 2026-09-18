@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.4.5
+
+- **Reports are now laid out in labelled sections, one metric per line** — no more
+  comma run-on lines. Instead of `[done / ppv] PPV: 322 events added, 461 updated, …`
+  a run reads:
+
+  ```
+  PPV events — done
+
+  Events
+    • 322 added
+    • 461 updated
+    • 295 ended / removed
+
+  Live now
+    • 1085 total
+    • 296 failover pairs
+    • 789 single-source
+  ```
+
+  Reconcile runs get **Streams / Channels / Changes / EPG / Health / Backup** sections
+  the same way. Built from the stats (not the pre-baked sentence) and mode-aware, so
+  each job labels its own numbers and only rows with real data appear. Applies to the
+  scheduled-reconcile Gotify and the **View last results** panel.
+
 ## v0.4.4
 
 - **Notifications are now multi-line and easy to read.** Gotify handles long messages, so

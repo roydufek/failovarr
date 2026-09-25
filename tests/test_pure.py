@@ -216,6 +216,32 @@ def test_group_is_foreign_region_relax_all_forms():
     assert F("|AR| TABII") is True
 
 
+def test_homoglyph_fold():
+    # Latin small-cap look-alikes NFKD leaves alone get mapped to ASCII
+    assert fv._fold("cɪty") == "cIty"          # ɪ -> I
+    assert fv._fold("ɴᴀ") == "NA"          # ɴᴀ -> NA
+    # superscripts still fold as before (NFKD)
+    assert fv._fold("ᴴᴰ") == "HD"          # ᴴᴰ -> HD
+    # real non-Latin is NOT touched (must stay foreign-detectable)
+    assert fv._is_non_latin("مسلسلات") is True
+    assert fv._is_non_latin("Россия") is True
+
+
+def test_duplicate_prefix_fold():
+    RA = {"US", "EN"}
+    DUP = {"TV"}
+    # a TV|-dump channel now shares the key with the clean copy -> they merge
+    k_clean = fv._consolidation_key("US| A&E HD", RA, True, frozenset())
+    k_tv = fv._consolidation_key("TV| A&E RAW", RA, True, DUP)
+    assert k_clean == k_tv
+    # without the dup list, TV stays in the key (distinct channel) — the old behaviour
+    assert fv._consolidation_key("TV| A&E RAW", RA, True, frozenset()) != k_clean
+    # display name drops the folded prefix too
+    assert fv._display_name("TV| A&E RAW", RA, DUP) == "A&E RAW"
+    # a non-region, non-dup prefix (GO/PRIME) is still kept
+    assert "GO" in fv._consolidation_key("GO| FOO", RA, True, DUP)
+
+
 def test_govt_block():
     # header carries the true count; one bullet line per item; no tail under the cap
     items = [("trex", "live", "US| A"), ("strong", "vod", "EN - B")]

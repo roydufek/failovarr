@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.4.5"
+__version__ = "0.4.6"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -148,6 +148,7 @@ _SCHED_DEFAULTS = {
     "filter_foreign_country": True,
     "keep_us_market": True,
     "region_allowlist": DEFAULT_REGION_ALLOW,
+    "duplicate_prefixes": "",
     "merge_quality_variants": True,
     "skip_junk_names": True,
     "adult_profile_split": True,
@@ -297,10 +298,25 @@ _CALL_BARE = re.compile(r"\b([WK][A-Z]{2,3})\b")
 
 
 # ------------------------------------------------------------ normalization
+# Latin look-alike letters that NFKD does NOT decompose (providers use them to dodge
+# name cleaning / filters, e.g. "cɪty" with a small-cap I). Mapped to ASCII so grouping
+# and matching see the real word. **LATIN-SCRIPT ONLY** — never add Cyrillic/Greek
+# look-alikes here, or a genuinely foreign non-Latin name would fold to ASCII and slip
+# past _is_non_latin / the foreign filter.
+_HOMOGLYPHS = {
+    0x026A: "I", 0x1D00: "A", 0x0299: "B", 0x1D04: "C", 0x1D05: "D", 0x1D07: "E",
+    0x0262: "G", 0x029C: "H", 0x1D0A: "J", 0x1D0B: "K", 0x029F: "L", 0x1D0D: "M",
+    0x0274: "N", 0x1D0F: "O", 0x1D18: "P", 0x0280: "R", 0x1D1B: "T", 0x1D1C: "U",
+    0x1D20: "V", 0x1D21: "W", 0x028F: "Y", 0x1D22: "Z",
+}
+
+
 def _fold(s):
-    """NFKD-fold: superscripts -> plain (ᴴᴰ->HD, ⁶⁰->60), NBSP->space, drop marks."""
+    """NFKD-fold: superscripts -> plain (ᴴᴰ->HD, ⁶⁰->60), NBSP->space, drop marks, and
+    map Latin look-alike letters (ɪ->I) that NFKD leaves untouched."""
     if not s:
         return ""
+    s = s.translate(_HOMOGLYPHS)
     out = []
     for ch in unicodedata.normalize("NFKD", s):
         if unicodedata.category(ch) == "Mn":  # combining mark
@@ -361,15 +377,15 @@ def _quality_suffix(name):
     return " ".join(p for p in (tier, fps) if p)
 
 
-def _consolidation_key(name, region_allow, drop_quality):
-    """Group-by key: strip region prefix (US/EN), keep other prefixes. With
-    ``drop_quality`` (merge_quality_variants ON) every resolution/framerate variant
-    collapses to one channel; otherwise a canonical tier is appended so HD/4K/fps stay
-    distinct but still pair across providers."""
+def _consolidation_key(name, region_allow, drop_quality, dup_prefixes=frozenset()):
+    """Group-by key: strip region prefix (US/EN) and any duplicate-fold prefix (e.g. TV),
+    keep other prefixes. With ``drop_quality`` (merge_quality_variants ON) every
+    resolution/framerate variant collapses to one channel; otherwise a canonical tier is
+    appended so HD/4K/fps stay distinct but still pair across providers."""
     s = _fold(name)
     ptoks, body = _prefix_tokens(s)
-    if ptoks and ptoks[0] in region_allow:
-        s = body  # region prefix stripped; a non-region prefix (GO/PRIME) stays in
+    if ptoks and (ptoks[0] in region_allow or ptoks[0] in dup_prefixes):
+        s = body  # region/duplicate prefix stripped; other prefixes (GO/PRIME) stay in
     # Preserve a "+" as its own token so a "+" brand stays DISTINCT from the base
     # channel (AMC vs AMC+, Paramount vs Paramount+) instead of collapsing together.
     s = s.replace("+", " PLUS ")
@@ -570,11 +586,11 @@ def _govt_block(label, items, cap=_GOV_LIST_CAP):
     return lines
 
 
-def _display_name(name, region_allow):
-    """Human channel name: region prefix stripped, superscripts folded, kept legible."""
+def _display_name(name, region_allow, dup_prefixes=frozenset()):
+    """Human channel name: region/duplicate prefix stripped, superscripts folded, legible."""
     s = _fold(name)
     ptoks, body = _prefix_tokens(s)
-    if ptoks and ptoks[0] in region_allow:
+    if ptoks and (ptoks[0] in region_allow or ptoks[0] in dup_prefixes):
         s = body
     s = re.sub(r"\s+", " ", s).strip()
     return s or (name or "").strip()
@@ -961,6 +977,21 @@ class Plugin:
                 "type": "string",
                 "default": DEFAULT_REGION_ALLOW,
                 "help_text": "Prefixes stripped from the matching key (kept for display). Other prefixes (GO/PRIME) stay in the key.",
+            },
+            {
+                "id": "duplicate_prefixes",
+                "label": "Duplicate prefixes to fold (comma-separated)",
+                "type": "string",
+                "default": "",
+                "help_text": (
+                    "Provider prefixes that are just a redundant copy of your lineup "
+                    "(e.g. a flat 'TV|' dump of channels you already have). Listed prefixes "
+                    "are stripped from the matching key so those streams MERGE onto your "
+                    "existing channels as extra failover — but they never take over a "
+                    "channel's name or group (a non-duplicate stream always wins). Unlike "
+                    "'Region prefixes to strip', this does not affect the foreign filter. "
+                    "Leave blank if you don't have such a dump."
+                ),
             },
             {
                 "id": "merge_quality_variants",
@@ -1651,10 +1682,16 @@ class Plugin:
                         key = f"{net} {callsign}"
                         local_net = net  # group locals under their network, not the package
                 if key is None:
-                    key = _consolidation_key(name, region_allow, cfg["merge_quality"])
+                    key = _consolidation_key(name, region_allow, cfg["merge_quality"], cfg["dup_prefixes"])
                 if not key:
                     stats["skip_junk"] += 1
                     continue
+
+                # Is this stream from a "duplicate-fold" prefix (e.g. TV|)? Such streams
+                # merge in as failover but must NOT drive the channel's name/group — a
+                # non-duplicate stream always wins presentation.
+                ptoks, _body = _prefix_tokens(_fold(name))
+                is_dup = bool(ptoks and ptoks[0] in cfg["dup_prefixes"])
 
                 # Group: a big-four local sits under its NETWORK; a DirecTV-style CITY|
                 # affiliate (CW/PBS/Telemundo/MyNetworkTV/Independent…) is grouped under
@@ -1669,15 +1706,22 @@ class Plugin:
                 b = buckets.get(key)
                 if b is None:
                     b = buckets[key] = {
-                        "display": _display_name(name, region_allow),
+                        "display": _display_name(name, region_allow, cfg["dup_prefixes"]),
                         "is_adult": is_adult,
                         "epg_key": _epg_key(name),
                         "callsign": callsign,
                         "group": grp,
                         "prov": {},
+                        "dup_src": is_dup,  # did the current name/group come from a dup stream?
                     }
                 else:
                     b["is_adult"] = b["is_adult"] or is_adult
+                    # A non-duplicate stream reclaims the name/group from a duplicate one.
+                    if b.get("dup_src") and not is_dup:
+                        b["display"] = _display_name(name, region_allow, cfg["dup_prefixes"])
+                        b["group"] = grp
+                        b["epg_key"] = _epg_key(name)
+                        b["dup_src"] = False
                 b["prov"].setdefault(idx, []).append((_quality_rank(name), pk))
 
         for b in buckets.values():
@@ -2204,6 +2248,7 @@ class Plugin:
         return {
             "nproviders": len(providers),
             "region_allow": region_allow,
+            "dup_prefixes": {t.strip().upper() for t in (settings.get("duplicate_prefixes") or "").split(",") if t.strip()},
             "skip_re": settings.get("skip_groups", DEFAULT_SKIP_GROUPS),
             "adult_re": settings.get("adult_detect", DEFAULT_ADULT_DETECT),
             "include_247": bool(settings.get("include_247", True)),

@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.6
+
+- **New: "Duplicate prefixes to fold".** For when a provider ships a redundant copy of
+  your lineup under a flat prefix (e.g. a `TV|` dump of channels you already have). List
+  the prefix (`TV`) and those streams **merge onto your existing channels as extra
+  failover** — but they never take over a channel's name or group: a non-duplicate stream
+  always wins presentation. So `TV| A&E RAW` folds into your `A&E HD` in ENTERTAINMENT
+  instead of dragging it into a generic "TV" group. Unlike *Region prefixes to strip*, it
+  does not touch the foreign filter. Blank by default.
+- **Homoglyph folding.** `_fold` now maps Latin look-alike letters that NFKD leaves alone
+  (e.g. `ɪ` U+026A → `I`, so `cɪty` → `cIty`) — providers use these to dodge name cleaning
+  and filters. Scoped to Latin-script only, so genuinely non-Latin names still register as
+  foreign.
+
 ## v0.4.5
 
 - **Reports are now laid out in labelled sections, one metric per line** — no more

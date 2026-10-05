@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -332,11 +332,13 @@ def _fold(s):
 
 def _prefix_tokens(s):
     """(prefix_tokens, body) split on the first | or :. prefix_tokens is the list of
-    alnum tokens in the prefix ("AR 4K:" -> (['AR','4K'], body)); ([], s) if none."""
+    alnum tokens in the prefix ("AR 4K:" -> (['AR','4K'], body)); ([], s) if none.
+    '&' stays INSIDE a token so a brand prefix reads whole: "AT&T:" -> ['AT&T'], not
+    ['AT','T'] (which mis-read as AT = Austria and dropped a US lineup as foreign)."""
     m = _PREFIX_RE.match(s)
     if not m:
         return [], s
-    toks = [t for t in re.split(r"[^0-9A-Za-z]+", m.group(1).upper()) if t]
+    toks = [t for t in re.split(r"[^0-9A-Za-z&]+", m.group(1).upper()) if t.strip("&")]
     if not toks:
         return [], s
     return toks, m.group(2)

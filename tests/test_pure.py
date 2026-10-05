@@ -343,6 +343,24 @@ def test_refresh_sequential_multi_and_unavailable():
     assert res2 == {"strong": "unavailable"} and calls2 == []
 
 
+def test_brand_prefix_with_ampersand():
+    RA = {"US", "EN"}
+    # AT&T reads as one prefix word, not AT (Austria)
+    assert fv._country_prefix("AT&T: ZONA TUDN \u1d3f\u1d2c\u1d42") == "AT&T"
+    assert fv._group_is_foreign("AT&T: ZONA TUDN RAW", RA, True) is False
+    assert fv._group_is_foreign("AT&T: WORLD POKER TOUR RAW", RA, True) is False
+    # real Austria is still foreign
+    assert fv._group_is_foreign("AT| ORF 1 HD", RA, True) is True
+    # folded as a duplicate prefix -> same key as the clean copy, display drops it
+    DUP = {"TV", "AT&T"}
+    assert fv._consolidation_key("AT&T: ZONA TUDN RAW", RA, True, DUP) == \
+        fv._consolidation_key("US| ZONA TUDN", RA, True, frozenset())
+    assert fv._display_name("AT&T: ZONA TUDN RAW", RA, DUP) == "ZONA TUDN RAW"
+    # without it, AT&T stays in the key (distinct channel)
+    assert fv._consolidation_key("AT&T: ZONA TUDN RAW", RA, True, {"TV"}) != \
+        fv._consolidation_key("US| ZONA TUDN", RA, True, frozenset())
+
+
 def test_govt_block():
     # header carries the true count; one bullet line per item; no tail under the cap
     items = [("trex", "live", "US| A"), ("strong", "vod", "EN - B")]

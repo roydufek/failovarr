@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.5.1
+
+- **Fix: an `AT&T:` channel lineup was filtered out as foreign.** The prefix parser split
+  `AT&T` at the `&` and read the first piece, `AT`, as the country code for Austria — so a
+  provider's whole `AT&T: …` US lineup (846 streams on one box) was dropped by the foreign
+  filter. `&` now stays inside the prefix word, so `AT&T` is its own prefix; genuine `AT|`
+  (Austria) channels are still filtered.
+- **If your provider ships such a brand-prefixed copy of channels you already have**, list
+  it in **Duplicate prefixes to fold** (e.g. `TV,AT&T`) so it merges onto your existing
+  channels as failover instead of creating duplicates. Without that, the newly un-filtered
+  channels appear as separate channels under their own group.
+
 ## v0.5.0
 
 - **New groups' channels now land the same run they're enabled.** Dispatcharr only imports a

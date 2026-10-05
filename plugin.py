@@ -76,7 +76,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.4.6"
+__version__ = "0.5.0"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -117,6 +117,10 @@ HEALTH_DROP_FRAC = 0.5     # would-prune > 50% of existing = a collapse
 SCHED_TICK_SECS = 30
 SCHED_WINDOW_SECS = 6 * 3600
 SCHED_COOLDOWN_SECS = 15 * 60
+# Governance refresh: after enabling new groups, refresh that provider's playlist and wait
+# (Dispatcharr only imports streams for ENABLED groups). Per-account wait cap; on timeout
+# the run carries on and the channels arrive with the next regular refresh.
+REFRESH_TIMEOUT_SECS = 600
 MAX_DAILY_ATTEMPTS = 3        # hard cap on scheduled runs per day (stops retry/notify spam)
 # A crashed holder is reclaimed IMMEDIATELY via the pid-liveness check; this age-only
 # ceiling is just the backstop for the rare pid-reuse case, set well above any real run
@@ -163,6 +167,7 @@ _SCHED_DEFAULTS = {
     "locals_by_name": True,
     "group_governance": False,
     "group_governance_auto": False,
+    "governance_refresh": True,
     "ppv_events": False,
     "ppv_min_providers": 1,
     "ppv_groups": _PPV_DEFAULT_GROUPS,
@@ -586,6 +591,25 @@ def _govt_block(label, items, cap=_GOV_LIST_CAP):
     return lines
 
 
+_REFRESH_LABELS = {
+    "ok": "done — channels imported",
+    "timeout": "timed out — channels arrive with the next regular refresh",
+    "error": "failed — channels arrive with the next regular refresh",
+    "unavailable": "couldn't start a refresh — channels arrive with the next regular refresh",
+    "cancelled": "skipped (run cancelled)",
+}
+
+
+def _refresh_lines(results):
+    """Report lines for a governance playlist refresh ({account: result} -> list of lines)."""
+    if not results:
+        return []
+    lines = ["Playlist refresh (to import the kept groups):"]
+    for name, res in results.items():
+        lines.append("  • %s — %s" % (name, _REFRESH_LABELS.get(res, res)))
+    return lines
+
+
 def _display_name(name, region_allow, dup_prefixes=frozenset()):
     """Human channel name: region/duplicate prefix stripped, superscripts folded, legible."""
     s = _fold(name)
@@ -837,7 +861,7 @@ class Plugin:
         {
             "id": "approve_new_groups",
             "label": "✅ Approve new groups",
-            "description": "Group governance: enable the new groups your foreign filter would KEEP (region-aware), leave foreign/junk disabled, accept all pending into the baseline, and reconcile so the kept channels flow in.",
+            "description": "Group governance: enable the new groups your foreign filter would KEEP (region-aware), leave foreign/junk disabled, accept all pending into the baseline, refresh that provider's playlist so their channels import, and reconcile them in.",
             "button_label": "Approve new",
             "button_variant": "filled",
             "confirm": {
@@ -846,7 +870,7 @@ class Plugin:
                 "message": (
                     "Enables the pending new groups your region filter keeps "
                     "(foreign/junk stay disabled), commits all pending to the "
-                    "baseline, and runs a reconcile to bring the kept channels in. "
+                    "baseline, refreshes that provider's playlist, then reconciles the kept channels in. "
                     "Proceed?"
                 ),
             },
@@ -1156,6 +1180,21 @@ class Plugin:
                     "filter would KEEP (region_allowlist / keep US-market — NOT hardcoded to "
                     "US) and reconciles them in; foreign/junk stay disabled. Off = manual: "
                     "you're notified and approve via the action buttons."
+                ),
+            },
+            {
+                "id": "governance_refresh",
+                "label": "↳ Refresh playlist after enabling new groups",
+                "type": "boolean",
+                "default": True,
+                "help_text": (
+                    "Dispatcharr only imports a group's channels while it is ENABLED, and new "
+                    "groups arrive disabled — so a group enabled after the nightly playlist pull "
+                    "would stay empty until the next one. On: when governance enables groups "
+                    "(auto mode or Approve), Failovarr refreshes just that provider's playlist, "
+                    "waits for it (up to 10 min), then reconciles — the channels land the same "
+                    "run. Only fires on days something new was enabled. Note: the refresh also "
+                    "rebuilds that provider's VOD in the background for a few minutes."
                 ),
             },
             {
@@ -2274,6 +2313,7 @@ class Plugin:
             "locals_by_name": bool(settings.get("locals_by_name", True)),
             "group_governance": bool(settings.get("group_governance", False)),
             "group_governance_auto": bool(settings.get("group_governance_auto", False)),
+            "governance_refresh": bool(settings.get("governance_refresh", True)),
             "ppv_events": bool(settings.get("ppv_events", False)),
             "ppv_min_providers": max(1, int(settings.get("ppv_min_providers", 1) or 1)),
             "ppv_groups": settings.get("ppv_groups", _PPV_DEFAULT_GROUPS),
@@ -2558,6 +2598,13 @@ class Plugin:
                     [n for (a, t, n) in keep if a == acct_name and t == "vod"],
                 )
             report["enabled"] = len(keep)
+            # New groups arrive disabled, so the playlist pull that discovered them imported
+            # no streams. Refresh just those providers now (in priority order) so the
+            # reconcile that follows actually brings the channels in.
+            if cfg.get("governance_refresh", True):
+                names = {a for (a, _t, _n) in keep}
+                accts = [a for a in providers if a.name in names]
+                report["refreshed"] = self._refresh_accounts(accts)
 
         if mode in ("auto", "approve", "dismiss"):
             _rebaseline()  # both approve and dismiss "decide" all pending -> into baseline
@@ -2573,14 +2620,60 @@ class Plugin:
         sig = sorted("%s␟%s␟%s" % (a, t, n) for (a, t, n, _f) in pending)
         if mode in ("scan", "auto"):
             if sig and sig != gov.get("last_notified", []):
-                self._gotify_group_alert(settings, pending, mode, flipped)
+                self._gotify_group_alert(settings, pending, mode, flipped, report.get("refreshed"))
                 gov["last_notified"] = sig
                 self._write_gov(gov)
 
-        report["message"] = self._format_gov(mode, pending, keep, skip, flipped, report["enabled"])
+        report["message"] = self._format_gov(mode, pending, keep, skip, flipped, report["enabled"],
+                                             report.get("refreshed"))
         return report
 
-    def _gotify_group_alert(self, settings, pending, mode, flipped):
+    def _refresh_accounts(self, accounts, timeout=REFRESH_TIMEOUT_SECS):
+        """Refresh M3U accounts ONE AT A TIME and wait for each to finish, so groups just
+        enabled get their streams imported (Dispatcharr only imports ENABLED groups, and new
+        groups arrive disabled). Sequential on purpose: simultaneous refreshes on the same
+        provider trip provider-side 404s. Never raises; returns {account_name: result}."""
+        results = {}
+        try:
+            from apps.m3u.tasks import refresh_single_m3u_account
+        except Exception:
+            logger.exception("[Failovarr] governance refresh: cannot import refresh task")
+            return {a.name: "unavailable" for a in accounts}
+        terminal = ("success", "error")
+        for acct in accounts:
+            if self._cancel.is_set():
+                results[acct.name] = "cancelled"
+                continue
+            close_old_connections()
+            before = M3UAccount.objects.filter(id=acct.id).values_list("updated_at", flat=True).first()
+            try:
+                refresh_single_m3u_account.delay(acct.id)
+            except Exception:
+                logger.exception("[Failovarr] governance refresh: could not queue %s", acct.name)
+                results[acct.name] = "unavailable"
+                continue
+            logger.info("[Failovarr] governance refresh: refreshing %s to import newly enabled groups", acct.name)
+            start = time.time()
+            res, seen_busy = "timeout", False
+            while time.time() - start < timeout:
+                time.sleep(5)
+                close_old_connections()
+                row = M3UAccount.objects.filter(id=acct.id).values("status", "updated_at").first() or {}
+                st = row.get("status")
+                if st and st not in terminal:
+                    seen_busy = True
+                    continue
+                # Finished = terminal status AND (we saw it working, or it was re-stamped after
+                # we queued it and enough time passed that a queued task would have started).
+                restamped = bool(before and row.get("updated_at") and row["updated_at"] > before)
+                if st in terminal and (seen_busy or (restamped and time.time() - start >= 30)):
+                    res = "ok" if st == "success" else "error"
+                    break
+            results[acct.name] = res
+            logger.info("[Failovarr] governance refresh: %s -> %s (%.0fs)", acct.name, res, time.time() - start)
+        return results
+
+    def _gotify_group_alert(self, settings, pending, mode, flipped, refreshed=None):
         kept = [(a, t, n) for (a, t, n, f) in pending if not f]
         forn = [(a, t, n) for (a, t, n, f) in pending if f]
         lines = ["%d new provider group(s) past baseline." % len(pending)]
@@ -2591,12 +2684,15 @@ class Plugin:
         if forn:
             lines.append("")
             lines += _govt_block("foreign/junk (ignored)", forn)
+        if refreshed:
+            lines.append("")
+            lines += _refresh_lines(refreshed)
         if flipped:
             lines.append("")
             lines.append("(enforced auto-enable-new-groups OFF on: %s)" % ", ".join(flipped))
         self._gotify_send(settings, "Failovarr 🆕 new groups", "\n".join(lines), 5)
 
-    def _format_gov(self, mode, pending, keep, skip, flipped, enabled):
+    def _format_gov(self, mode, pending, keep, skip, flipped, enabled, refreshed=None):
         parts = []
         if flipped:
             parts.append("enforced auto-add OFF on %s" % ", ".join(flipped))
@@ -2612,6 +2708,9 @@ class Plugin:
         if skip:
             lines.append("")
             lines += _govt_block("foreign/junk", skip)
+        if refreshed:
+            lines.append("")
+            lines += _refresh_lines(refreshed)
         return "\n".join(lines)
 
     def _emergency_alert(self, settings, health):

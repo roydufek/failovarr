@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.0
+
+- **New groups' channels now land the same run they're enabled.** Dispatcharr only imports a
+  group's channels while the group is *enabled*, and with auto-enable off new groups arrive
+  disabled — so the nightly playlist pull that discovers a group imports nothing, and a group
+  governance enabled afterwards sat empty until the next day's pull. Now, when governance
+  enables groups (auto mode or **Approve**), Failovarr refreshes **just that provider's**
+  playlist, **waits for it** (up to 10 min; providers one at a time to avoid same-provider
+  404s), then reconciles — so the channels arrive in the same run. Only fires on days
+  something new was enabled; a refresh that fails or times out is reported and the run carries
+  on (channels then arrive with the next regular refresh). The new-groups Gotify and the
+  Check/Approve report show the refresh outcome. Toggle: **↳ Refresh playlist after enabling
+  new groups** (on by default).
+
 ## v0.4.6
 
 - **New: "Duplicate prefixes to fold".** For when a provider ships a redundant copy of

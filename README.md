@@ -167,6 +167,15 @@ watches, classifies, and notifies so you *opt in* instead of cleaning up after a
   seen, and reconcile the kept channels in), **Dismiss new groups** (accept them all
   into the baseline without enabling anything). Or turn on **↳ Auto mode** to auto-enable
   the kept groups and reconcile on every run, hands-off.
+- **New groups' channels land the same run.** Dispatcharr only imports a group's channels
+  while it's *enabled*, and new groups arrive disabled — so a group enabled after the
+  nightly playlist pull would otherwise sit empty for a day. With **↳ Refresh playlist
+  after enabling new groups** (on by default), whenever governance enables something
+  (auto or Approve) Failovarr refreshes just that provider's playlist, waits for it (up to
+  10 min, one provider at a time), then reconciles. It only fires on days something new
+  was enabled; the refresh also rebuilds that provider's VOD in the background for a few
+  minutes. (From the Approve button this can outlast your browser's timeout and show a
+  504 — the run still completes; check *View last results*.)
 
 **Governance only ever *enables* — it never disables a group.** Approve/Auto set groups
 to enabled; Dismiss just records them as seen. Nothing here (or anywhere in the plugin)
@@ -271,6 +280,9 @@ After installing, enable Failovarr and configure:
   Dispatcharr's *auto-enable new groups* off. Off = dormant.
 - **↳ Auto mode** — auto-enable the new groups your foreign filter keeps and reconcile
   them in, every run. Off = manual (you approve via the action buttons).
+- **↳ Refresh playlist after enabling new groups** — when groups are enabled, refresh that
+  provider's playlist and wait so their channels import in the same run (otherwise they
+  arrive with the next regular refresh). On by default.
 
 **Schedule & notifications**
 - **Daily reconcile time (HH:MM, UTC)** — blank disables. Reconcile only, never wipes.

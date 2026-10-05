@@ -242,6 +242,107 @@ def test_duplicate_prefix_fold():
     assert "GO" in fv._consolidation_key("GO| FOO", RA, True, DUP)
 
 
+def test_refresh_lines():
+    assert fv._refresh_lines({}) == []
+    ls = fv._refresh_lines({"strong": "ok", "trex": "timeout"})
+    assert ls[0].startswith("Playlist refresh")
+    assert any("strong" in l and "imported" in l for l in ls)
+    assert any("trex" in l and "next regular refresh" in l for l in ls)
+
+
+# --- governance refresh: the wait loop (fake DB rows + fake clock) ---------------
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def time(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+def _run_refresh(status_seq, accounts=(("strong", 11),), task_ok=True, timeout=600):
+    """Drive Plugin._refresh_accounts with a scripted status sequence per account."""
+    import types as _t
+    calls = []
+    seqs = {aid: list(status_seq) for _n, aid in accounts}
+
+    class _QS:
+        def __init__(self, aid):
+            self.aid, self.mode = aid, None
+
+        def values_list(self, *a, **k):
+            self.mode = "before"
+            return self
+
+        def values(self, *a):
+            self.mode = "row"
+            return self
+
+        def first(self):
+            if self.mode == "before":
+                return 100  # updated_at before we queued
+            q = seqs[self.aid]
+            st = q.pop(0) if len(q) > 1 else q[0]  # last status sticks
+            return {"status": st, "updated_at": 200 if st in ("success", "error") else 150}
+
+    class _Mgr:
+        def filter(self, id=None, **k):
+            return _QS(id)
+
+    fake_acct_model = _t.SimpleNamespace(objects=_Mgr())
+    task_mod = _t.ModuleType("apps.m3u.tasks")
+    if task_ok:
+        task_mod.refresh_single_m3u_account = _t.SimpleNamespace(delay=lambda aid: calls.append(aid))
+    clock = _FakeClock()
+    saved = (fv.M3UAccount, fv.time, sys.modules.get("apps.m3u.tasks"))
+    fv.M3UAccount, fv.time = fake_acct_model, clock
+    sys.modules["apps.m3u.tasks"] = task_mod
+    try:
+        p = fv.Plugin.__new__(fv.Plugin)
+        fv.Plugin._cancel.clear()
+        accts = [_t.SimpleNamespace(name=n, id=i) for n, i in accounts]
+        return p._refresh_accounts(accts, timeout=timeout), calls
+    finally:
+        fv.M3UAccount, fv.time = saved[0], saved[1]
+        if saved[2] is None:
+            sys.modules.pop("apps.m3u.tasks", None)
+        else:
+            sys.modules["apps.m3u.tasks"] = saved[2]
+
+
+def test_refresh_waits_for_success():
+    res, calls = _run_refresh(["fetching", "parsing", "parsing", "success"])
+    assert res == {"strong": "ok"} and calls == [11]
+
+
+def test_refresh_reports_error():
+    res, _ = _run_refresh(["fetching", "error"])
+    assert res == {"strong": "error"}
+
+
+def test_refresh_times_out_when_stuck():
+    res, _ = _run_refresh(["fetching"], timeout=60)
+    assert res == {"strong": "timeout"}
+
+
+def test_refresh_terminal_without_busy_needs_grace():
+    # Never saw fetching/parsing: a terminal status is only trusted once re-stamped AND >=30s
+    # have passed (so a leftover 'success' from the previous refresh isn't taken as done).
+    res_early, _ = _run_refresh(["success"], timeout=20)
+    assert res_early == {"strong": "timeout"}
+    res_late, _ = _run_refresh(["success"], timeout=60)
+    assert res_late == {"strong": "ok"}
+
+
+def test_refresh_sequential_multi_and_unavailable():
+    res, calls = _run_refresh(["fetching", "success"], accounts=(("trex", 10), ("strong", 11)))
+    assert list(res) == ["trex", "strong"] and calls == [10, 11]
+    res2, calls2 = _run_refresh(["success"], task_ok=False)
+    assert res2 == {"strong": "unavailable"} and calls2 == []
+
+
 def test_govt_block():
     # header carries the true count; one bullet line per item; no tail under the cap
     items = [("trex", "live", "US| A"), ("strong", "vod", "EN - B")]

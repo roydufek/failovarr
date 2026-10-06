@@ -3,12 +3,19 @@
     "slug": "failovarr",
     "name": "Failovarr",
     "latest": {
-      "version": "0.5.1",
-      "url": "v0.5.1/failovarr-0.5.1.zip",
-      "sha256": "79ea07efb09e7d533522981360f9d4ac79422e0f511a244fa9c1da7d74a6768e",
-      "size": 1294802
+      "version": "0.5.2",
+      "url": "v0.5.2/failovarr-0.5.2.zip",
+      "sha256": "c4a8888a01eda7f2870c35bb2a3bd29304adffd655f31508a278a48f7e09e01e",
+      "size": 1299819
     },
     "versions": [
+      {
+        "version": "0.5.2",
+        "url": "v0.5.2/failovarr-0.5.2.zip",
+        "sha256": "c4a8888a01eda7f2870c35bb2a3bd29304adffd655f31508a278a48f7e09e01e",
+        "size": 1299819,
+        "min_dispatcharr_version": "v0.20.0"
+      },
       {
         "version": "0.5.1",
         "url": "v0.5.1/failovarr-0.5.1.zip",
@@ -221,5 +228,5 @@
       }
     ]
   },
-  "signature": "-----BEGIN PGP SIGNATURE-----\n\niHUEABYKAB0WIQTbTK/Tr1REt41RnZhi5vxxPOMnfgUCasPllAAKCRBi5vxxPOMn\nfsLdAQDzdB/R9+UIe+VziwjkSIetaGEITh8Y8GJC0f8gxp50YgD/UFi+uTVhbq/R\nMRM7TyWBjx+6f7rPG3rSQ+bNYvEpPQs=\n=VDVK\n-----END PGP SIGNATURE-----"
+  "signature": "-----BEGIN PGP SIGNATURE-----\n\niHUEABYKAB0WIQTbTK/Tr1REt41RnZhi5vxxPOMnfgUCasVXUAAKCRBi5vxxPOMn\nfkDMAP9HJBU3BAo/cQadric/BJqglF+M0lnlt0ir2C9mUlTBwQD/XSZcS7KzUNJd\ngGi6VojT8eoaqVztmcrj2E4kJFPmhgw=\n=8DM6\n-----END PGP SIGNATURE-----"
 }

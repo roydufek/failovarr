@@ -78,7 +78,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -172,6 +172,7 @@ _SCHED_DEFAULTS = {
     "governance_refresh": True,
     "provider_health_check": True,
     "provider_health_vod": True,
+    "provider_health_min_mbps": 15,
     "ppv_events": False,
     "ppv_min_providers": 1,
     "ppv_groups": _PPV_DEFAULT_GROUPS,
@@ -629,15 +630,56 @@ def _aware_utc(dt):
     return dt.astimezone(datetime.timezone.utc)
 
 
+def _read_window(chunks, clock, t_request, window_s, cap_bytes):
+    """Consume an iterator of byte chunks for ~window_s seconds AFTER the first byte.
+    Throughput excludes time-to-first-byte (a slow start isn't a slow pipe) and the first
+    chunk itself (it lands at t_first, so it has no elapsed time to divide by).
+    Returns (ttfb_s, nbytes, read_s); ttfb_s is None when nothing arrived."""
+    t_first = None
+    n = 0
+    t_last = None
+    for ch in chunks:
+        if not ch:
+            continue
+        now = clock()
+        if t_first is None:
+            t_first = t_last = now
+        else:
+            n += len(ch)
+            t_last = now
+        if now - t_first >= window_s or n >= cap_bytes:
+            break
+    if t_first is None:
+        return (None, 0, 0.0)
+    return (t_first - t_request, n, max(t_last - t_first, 1e-6))
+
+
+def _fmt_rate(m):
+    if not m:
+        return ""
+    return "%.1f Mbps, first byte %.1fs" % (m.get("mbps", 0.0), m.get("ttfb", 0.0))
+
+
+def _speed_verdict(state, detail, mbps, min_mbps):
+    """Apply the route-speed threshold to a PASSING VOD check (an unthrottled movie read is
+    the only reliable measure of what the exit can carry). Returns (state, detail)."""
+    if state == "ok" and min_mbps and mbps is not None and mbps < min_mbps:
+        return ("warn", detail + " — below %g Mbps: this exit may be too slow (4K needs ~20–25)" % min_mbps)
+    return (state, detail)
+
+
 def _summarize_attempts(label, attempts, fail_hint=""):
-    """attempts = [(ok, status_code, message, what)]. Pass if ANY attempt passed (one dead
-    channel must not false-alarm). Returns (label, state, detail)."""
+    """attempts = [(ok, status_code, message, what[, metrics])]. Pass if ANY attempt passed
+    (one dead channel must not false-alarm). Returns (label, state, detail)."""
     if not attempts:
         return (label, "skip", "nothing to test")
-    for ok, code, _msg, what in attempts:
+    for a in attempts:
+        ok, code, _msg, what = a[:4]
+        metrics = a[4] if len(a) > 4 else None
         if ok:
-            return (label, "ok", "%s — %s" % (code or "OK", what))
-    codes = ", ".join(str(c or m) for _ok, c, m, _w in attempts)
+            rate = _fmt_rate(metrics)
+            return (label, "ok", "%s — %s%s" % (code or "OK", (rate + " — ") if rate else "", what))
+    codes = ", ".join(str(a[1] or a[2]) for a in attempts)
     detail = "0/%d reachable: %s" % (len(attempts), codes)
     if fail_hint:
         detail += " — " + fail_hint
@@ -1289,6 +1331,20 @@ class Plugin:
                     "works but VOD is blocked from this VPN server' case. Note: some providers keep "
                     "an abandoned VOD session open for a few minutes and refuse new connections "
                     "meanwhile, so this runs last, after the reconcile."
+                ),
+            },
+            {
+                "id": "provider_health_min_mbps",
+                "label": "↳ Speed warning below (Mbps, judged on the VOD read; 0 = off)",
+                "type": "number",
+                "default": 15,
+                "min": 0,
+                "help_text": (
+                    "The VOD check times ~8 s of a real movie through each provider's actual VPN/proxy "
+                    "path. Movie downloads aren't bitrate-throttled, so this is what the exit can really "
+                    "carry; warn when it's below this (a 4K stream needs ~20–25 Mbps). Live Mbps is shown "
+                    "for information only — a live channel arrives at its own bitrate (4K ranges ~8–31 "
+                    "Mbps by encoding), so it can't judge the route. Needs the VOD check on."
                 ),
             },
             {
@@ -2778,9 +2834,10 @@ class Plugin:
             if acc:
                 checks.append(acc)
             ua = self._hc_user_agent(acct)
+            min_mbps = float(settings.get("provider_health_min_mbps", 15) or 0)
             checks.append(safe("Live", self._hc_live, acct, profile, ua, cfg))
             if want_vod:
-                v = safe("VOD", self._hc_vod, acct, profile, ua)
+                v = safe("VOD", self._hc_vod, acct, profile, ua, min_mbps)
                 if v:
                     checks.append(v)
             results.append({"name": acct.name, "checks": checks})
@@ -2856,24 +2913,51 @@ class Plugin:
             used = int(getattr(profile, "current_viewers", 0) or 0)
         return used >= profile.max_streams
 
-    def _hc_validate(self, url, ua):
-        """(ok, status_code, message) — Dispatcharr's own validator when available."""
+    def _hc_measure(self, url, ua, window_s):
+        """Open the stream the way playback does (account UA, Connection: close), wait up to
+        20 s for the first byte (shorter windows false-fail on redirected live streams), then
+        time ~window_s seconds of data. Returns (ok, status_code, message, metrics|None).
+        The connection is always closed before returning, releasing the provider slot. The
+        URL is never logged or returned (XC credentials live in the path)."""
         if not url:
-            return (False, 0, "no URL")
+            return (False, 0, "no URL", None)
+        cap = 200 * 1024 * 1024
+        t_req = time.time()
         try:
-            from apps.proxy.live_proxy.url_utils import validate_stream_url
-            ok, _final, code, msg = validate_stream_url(url, user_agent=ua, timeout=(5, 10))
-            return (bool(ok), code, msg)
+            import requests
         except ImportError:
-            pass
-        try:
+            requests = None
+        if requests is not None:
+            sess = requests.Session()
+            sess.headers.update({"User-Agent": ua, "Connection": "close"})
+            r = None
+            try:
+                r = sess.get(url, stream=True, timeout=(10, 20), allow_redirects=True)
+                if not (200 <= r.status_code < 300):
+                    return (False, r.status_code, "HTTP %s" % r.status_code, None)
+                ttfb, n, secs = _read_window(r.iter_content(65536), time.time, t_req, window_s, cap)
+                if ttfb is None:
+                    return (False, r.status_code, "empty response", None)
+                return (True, r.status_code, "ok", {"mbps": n * 8 / secs / 1e6, "ttfb": ttfb})
+            except requests.exceptions.Timeout:
+                return (False, 0, "timeout", None)
+            except requests.exceptions.RequestException as e:
+                return (False, 0, type(e).__name__, None)
+            finally:
+                if r is not None:
+                    r.close()
+                sess.close()
+        try:  # stdlib fallback
             req = urllib.request.Request(url, headers={"User-Agent": ua, "Connection": "close"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return (len(r.read(1880)) > 0, r.status, "GET ok")
+            with urllib.request.urlopen(req, timeout=20) as r:
+                ttfb, n, secs = _read_window(iter(lambda: r.read(65536), b""), time.time, t_req, window_s, cap)
+                if ttfb is None:
+                    return (False, r.status, "empty response", None)
+                return (True, r.status, "ok", {"mbps": n * 8 / secs / 1e6, "ttfb": ttfb})
         except urllib.error.HTTPError as e:
-            return (False, e.code, "HTTP %s" % e.code)
+            return (False, e.code, "HTTP %s" % e.code, None)
         except Exception as e:
-            return (False, 0, type(e).__name__)
+            return (False, 0, type(e).__name__, None)
 
     def _hc_live_url(self, stream, acct, profile):
         try:
@@ -2887,6 +2971,9 @@ class Plugin:
         return stream.url
 
     def _hc_live(self, acct, profile, ua, cfg):
+        """Try up to 3 live channels (~5 s read each); pass on the first that delivers data,
+        so one dead channel can't false-alarm. Mbps is informational — a live channel
+        arrives at its own bitrate, so it says nothing about the route's capacity."""
         if self._hc_in_use(profile):
             return ("Live", "skip", "provider in use (someone's watching) — not tested")
         ids = list(ChannelStream.objects.filter(
@@ -2897,13 +2984,16 @@ class Plugin:
             stream = Stream.objects.filter(id=sid).first()
             if not stream:
                 continue
-            ok, code, msg = self._hc_validate(self._hc_live_url(stream, acct, profile), ua)
-            attempts.append((ok, code, msg, stream.name))
+            ok, code, msg, met = self._hc_measure(self._hc_live_url(stream, acct, profile), ua, 5)
+            attempts.append((ok, code, msg, stream.name, met))
             if ok:
                 break
-        return _summarize_attempts("Live", attempts, "live is down or blocked from this exit")
+        label, state, detail = _summarize_attempts("Live", attempts, "live is down or blocked from this exit")
+        if state == "ok":
+            detail = detail.replace(" Mbps,", " Mbps (channel bitrate),", 1)
+        return (label, state, detail)
 
-    def _hc_vod(self, acct, profile, ua):
+    def _hc_vod(self, acct, profile, ua, min_mbps=0):
         props = acct.custom_properties if isinstance(acct.custom_properties, dict) else {}
         if acct.account_type != "XC" or not props.get("enable_vod"):
             return None
@@ -2924,11 +3014,15 @@ class Plugin:
                 url = rel.get_stream_url(profile)
             except Exception:
                 url = None
-            ok, code, msg = self._hc_validate(url, ua)
-            attempts.append((ok, code, msg, rel.movie.name if rel.movie else rel.stream_id))
+            ok, code, msg, met = self._hc_measure(url, ua, 8)
+            attempts.append((ok, code, msg, rel.movie.name if rel.movie else rel.stream_id, met))
             if ok:
                 break
-        return _summarize_attempts("VOD", attempts, "VOD may be blocked from this VPN exit")
+        label, state, detail = _summarize_attempts("VOD", attempts, "VOD may be blocked from this VPN exit")
+        win = next((a for a in attempts if a[0]), None)
+        mbps = (win[4] or {}).get("mbps") if win and len(win) > 4 else None
+        state, detail = _speed_verdict(state, detail, mbps, min_mbps)
+        return (label, state, detail)
 
     def _refresh_accounts(self, accounts, timeout=REFRESH_TIMEOUT_SECS):
         """Refresh M3U accounts ONE AT A TIME and wait for each to finish, so groups just

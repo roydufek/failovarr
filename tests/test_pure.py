@@ -421,6 +421,55 @@ def test_hc_account():
     assert p._hc_account(prof(None, None)) is None                                  # no info -> no line
 
 
+# --- provider health: throughput ---------------------------------------------------
+def _clocked_chunks(times_and_sizes):
+    """Yield chunks of given sizes while a fake clock advances to the given times."""
+    clock = {"t": 0.0}
+    def gen():
+        for t, size in times_and_sizes:
+            clock["t"] = t
+            yield b"x" * size
+    return gen(), (lambda: clock["t"])
+
+
+def test_read_window_excludes_ttfb_and_first_chunk():
+    # request at t=0, first byte at t=4 (ttfb 4s), then 1 MB/s for 10s
+    seq = [(4.0, 1000)] + [(4.0 + i, 1_000_000) for i in range(1, 11)]
+    chunks, clock = _clocked_chunks(seq)
+    ttfb, n, secs = fv._read_window(chunks, clock, 0.0, 10, 10**9)
+    assert ttfb == 4.0
+    assert n == 10_000_000 and abs(secs - 10.0) < 1e-9          # first 1000 B excluded
+    assert abs(n * 8 / secs / 1e6 - 8.0) < 1e-9                 # 8 Mbps
+
+
+def test_read_window_stops_at_window_and_cap():
+    chunks, clock = _clocked_chunks([(1.0, 10)] + [(1.0 + i, 500) for i in range(1, 100)])
+    ttfb, n, secs = fv._read_window(chunks, clock, 0.0, 5, 10**9)
+    assert abs(secs - 5.0) < 1e-9 and n == 5 * 500             # stopped at the 5 s window
+    chunks, clock = _clocked_chunks([(0.5, 10)] + [(0.5 + i, 1000) for i in range(1, 100)])
+    ttfb, n, secs = fv._read_window(chunks, clock, 0.0, 999, 3000)
+    assert n == 3000                                             # stopped at the byte cap
+
+
+def test_read_window_nothing_arrived():
+    chunks, clock = _clocked_chunks([(1.0, 0), (2.0, 0)])
+    assert fv._read_window(chunks, clock, 0.0, 10, 10**9)[0] is None
+
+
+def test_speed_verdict():
+    st, d = fv._speed_verdict("ok", "200 — 9.5 Mbps — movie", 9.5, 15)
+    assert st == "warn" and "below 15 Mbps" in d
+    assert fv._speed_verdict("ok", "x", 25.3, 15)[0] == "ok"
+    assert fv._speed_verdict("ok", "x", 9.5, 0)[0] == "ok"        # 0 = off
+    assert fv._speed_verdict("fail", "x", 1.0, 15)[0] == "fail"   # a failure stays a failure
+    assert fv._speed_verdict("ok", "x", None, 15)[0] == "ok"      # nothing measured -> no verdict
+
+
+def test_summarize_attempts_shows_rate():
+    lab, st, d = fv._summarize_attempts("Live", [(True, 200, "ok", "ESPN 4K", {"mbps": 31.24, "ttfb": 3.2})])
+    assert st == "ok" and "31.2 Mbps" in d and "first byte 3.2s" in d and "ESPN 4K" in d
+
+
 def test_govt_block():
     # header carries the true count; one bullet line per item; no tail under the cap
     items = [("trex", "live", "US| A"), ("strong", "vod", "EN - B")]

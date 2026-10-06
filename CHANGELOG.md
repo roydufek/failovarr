@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.3
+
+- **Provider health check now measures speed.** The **VOD** check reads ~8 s of a real movie
+  through the provider's actual path (VPN / split-exit proxy) and reports **Mbps and
+  time-to-first-byte**; you're **warned (Gotify) when it's below a threshold** — new setting
+  *↳ Speed warning below (Mbps, judged on the VOD read; 0 = off)*, default **15**. Movie
+  downloads aren't bitrate-throttled, so this is what the exit can really carry. The **live**
+  check shows its Mbps for information only: a live channel arrives at its own bitrate
+  (measured "4K" channels ranged 8–31 Mbps on healthy routes), so it can't judge the route.
+- **Fix: false "live down" alarms on slow-starting streams.** The first-byte wait was 10 s;
+  redirected live streams (and strong at times) take up to ~16 s to start. Now 20 s.
+  Thanks to the dispatcharr agent's exit testing for the speed idea and the timeout finding.
+
 ## v0.5.2
 
 - **New: nightly provider health check.** At the end of the nightly run, every provider gets

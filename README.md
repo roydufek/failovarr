@@ -327,9 +327,17 @@ fixed):
   day, and did it return streams?
 - **Account** — is the subscription still Active and not about to expire (warns at ≤7
   days)? Read from Dispatcharr's last account-info refresh; no extra request.
-- **Live** — open up to 3 real live channels; passes if any returns video.
-- **VOD** — request the first bytes of up to 3 movies; catches "live works but VOD is
-  blocked from this VPN server".
+- **Live** — open up to 3 real live channels (~5 s each); passes if any returns video.
+  Its Mbps is shown for information only: a live channel arrives at its own bitrate (a
+  "4K" channel can be anywhere from ~8 to ~31 Mbps by encoding), so it can't judge the
+  route.
+- **VOD** — read ~8 s of up to 3 movies; catches "live works but VOD is blocked from this
+  VPN server". Movie downloads aren't bitrate-throttled, so this is **what the exit can
+  really carry** — you're **warned if it's below the speed threshold** (default 15 Mbps; a
+  4K stream needs ~20–25).
+
+Each live/VOD line also shows the **time to first byte**; the check allows up to 20 s
+(redirected live streams can take that long to start, and shorter waits false-alarm).
 
 It uses Dispatcharr's own URL building and stream validator, so every request takes the
 provider's real path (your VPN, a split-exit proxy, …) with the account's user-agent —

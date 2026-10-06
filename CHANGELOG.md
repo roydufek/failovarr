@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.2
+
+- **New: nightly provider health check.** At the end of the nightly run, every provider gets
+  four checks — **Playlist** (last refresh succeeded, ran within a day, returned streams),
+  **Account** (still Active; warns ≤7 days before expiry), **Live** (up to 3 real channels)
+  and **VOD** (first bytes of up to 3 movies). A Gotify alert fires **only when something
+  fails**, every night until it's fixed, laid out one check per line per provider. Requests go
+  through Dispatcharr's own URL builder and stream validator, so they take the provider's real
+  path (VPN / split-exit proxy) with the account's user-agent. Live/VOD tests are skipped while
+  someone is watching that provider. Runs last, after the reconcile, because some providers
+  refuse new connections for a few minutes after a VOD request. Toggles: **Nightly provider
+  health check** and **↳ Include the VOD check** (both on). Button: **🩺 Check providers now**.
+
 ## v0.5.1
 
 - **Fix: an `AT&T:` channel lineup was filtered out as foreign.** The prefix parser split

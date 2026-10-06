@@ -50,10 +50,12 @@ import glob
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -76,7 +78,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -168,6 +170,8 @@ _SCHED_DEFAULTS = {
     "group_governance": False,
     "group_governance_auto": False,
     "governance_refresh": True,
+    "provider_health_check": True,
+    "provider_health_vod": True,
     "ppv_events": False,
     "ppv_min_providers": 1,
     "ppv_groups": _PPV_DEFAULT_GROUPS,
@@ -612,6 +616,60 @@ def _refresh_lines(results):
     return lines
 
 
+# ---------------------------------------------------------------- provider health
+_HEALTH_MARK = {"ok": "✔", "fail": "✖", "warn": "⚠", "skip": "•"}
+
+
+def _aware_utc(dt):
+    """Normalize a datetime to tz-aware UTC (Dispatcharr stores aware; _now() is naive)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _summarize_attempts(label, attempts, fail_hint=""):
+    """attempts = [(ok, status_code, message, what)]. Pass if ANY attempt passed (one dead
+    channel must not false-alarm). Returns (label, state, detail)."""
+    if not attempts:
+        return (label, "skip", "nothing to test")
+    for ok, code, _msg, what in attempts:
+        if ok:
+            return (label, "ok", "%s — %s" % (code or "OK", what))
+    codes = ", ".join(str(c or m) for _ok, c, m, _w in attempts)
+    detail = "0/%d reachable: %s" % (len(attempts), codes)
+    if fail_hint:
+        detail += " — " + fail_hint
+    return (label, "fail", detail)
+
+
+def _health_problem(results):
+    """True if any provider has a failing or warning check (= send the alert)."""
+    return any(st in ("fail", "warn") for r in results for (_l, st, _d) in r["checks"])
+
+
+def _health_title(results):
+    bad = []
+    for r in results:
+        labels = [l for (l, st, _d) in r["checks"] if st in ("fail", "warn")]
+        if labels:
+            bad.append("%s %s" % (r["name"], "/".join(labels)))
+    return "Failovarr ⚠️ provider check: " + ("; ".join(bad) if bad else "all OK")
+
+
+def _health_lines(results):
+    """Sectioned report: one block per provider, one check per line."""
+    lines = []
+    for r in results:
+        if lines:
+            lines.append("")
+        lines.append(r["name"])
+        for label, st, detail in r["checks"]:
+            lines.append("  %s %s — %s" % (_HEALTH_MARK.get(st, "?"), label, detail))
+    return lines
+
+
 def _display_name(name, region_allow, dup_prefixes=frozenset()):
     """Human channel name: region/duplicate prefix stripped, superscripts folded, legible."""
     s = _fold(name)
@@ -901,6 +959,13 @@ class Plugin:
                     "initial seed or a deliberate clean rebuild. Proceed?"
                 ),
             },
+        },
+        {
+            "id": "provider_health",
+            "label": "🩺 Check providers now",
+            "description": "Check each provider: last playlist refresh, account status, a live channel and a movie (through the real VPN/proxy path). Shows the result here; the nightly run Gotifies only on failure.",
+            "button_label": "Check providers",
+            "button_variant": "outline",
         },
         {
             "id": "view_last",
@@ -1200,6 +1265,33 @@ class Plugin:
                 ),
             },
             {
+                "id": "provider_health_check",
+                "label": "Nightly provider health check",
+                "type": "boolean",
+                "default": True,
+                "help_text": (
+                    "At the end of the nightly run, check every provider: did its last playlist "
+                    "refresh succeed (and actually run in the last day), is the account still "
+                    "Active, does a live channel play, does a movie play. Uses Dispatcharr's own "
+                    "URL building and stream validator over the provider's real path (VPN/proxy), "
+                    "tries up to 3 items each, and skips the live/VOD test if someone is watching "
+                    "on that provider. Gotify alert ONLY when something fails (every night while "
+                    "it stays broken). Also available any time via 'Check providers now'."
+                ),
+            },
+            {
+                "id": "provider_health_vod",
+                "label": "↳ Include the VOD check",
+                "type": "boolean",
+                "default": True,
+                "help_text": (
+                    "Requests the first bytes of up to 3 movies per provider. Catches the 'live "
+                    "works but VOD is blocked from this VPN server' case. Note: some providers keep "
+                    "an abandoned VOD session open for a few minutes and refuse new connections "
+                    "meanwhile, so this runs last, after the reconcile."
+                ),
+            },
+            {
                 "id": "skip_stale",
                 "label": "Skip dead/stale streams",
                 "type": "boolean",
@@ -1351,6 +1443,8 @@ class Plugin:
             return self._action_governance("approve", settings)
         if action == "dismiss_new_groups":
             return self._action_governance("dismiss", settings)
+        if action == "provider_health":
+            return self._action_provider_health(settings)
         if action == "stop":
             self._cancel.set()
             return {"status": "ok", "message": "Cancellation requested."}
@@ -2630,6 +2724,212 @@ class Plugin:
                                              report.get("refreshed"))
         return report
 
+    # ------------------------------------------------------- provider health check
+    def _action_provider_health(self, settings):
+        try:
+            results = self._provider_health(dict(settings))
+        except Exception as exc:
+            logger.exception("failovarr provider health check failed")
+            return {"status": "error", "message": f"Provider check failed: {exc}"}
+        head = "Provider health check — " + ("problems found" if _health_problem(results) else "all OK")
+        return {"status": "ok", "message": "\n".join([head, ""] + _health_lines(results)), "result": results}
+
+    def _scheduled_health(self, cfg, datestr):
+        """Run the nightly provider check once per target day (a marker stops retry runs
+        from repeating the alert) and Gotify only if something failed."""
+        if not bool(cfg.get("provider_health_check", True)):
+            return
+        marker = os.path.join(SCHED_DIR, f"health-{datestr}.marker")
+        if os.path.exists(marker):
+            return
+        _touch(marker)
+        try:
+            results = self._provider_health(cfg)
+        except Exception:
+            logger.exception("failovarr scheduled provider health check failed")
+            return
+        logger.info("[Failovarr] provider health: %s", _health_title(results))
+        if _health_problem(results) and (cfg.get("gotify_notify") or "off").strip() != "off":
+            self._gotify_send(cfg, _health_title(results), "\n".join(_health_lines(results)), 7)
+
+    def _provider_health(self, settings):
+        """Per provider: playlist refresh, account status, a live channel, a movie.
+        Returns [{"name": acct, "checks": [(label, state, detail), ...]}]."""
+        cfg = self._engine_cfg(settings, self._region_allow(settings))
+        want_vod = bool(settings.get("provider_health_vod", True))
+        results = []
+        for acct in self._resolve_providers(settings):
+            if self._cancel.is_set():
+                break
+            close_old_connections()
+            acct = M3UAccount.objects.get(id=acct.id)
+
+            def safe(label, fn, *a):
+                # One broken check must never sink the whole report.
+                try:
+                    return fn(*a)
+                except Exception as exc:
+                    logger.exception("[Failovarr] provider health: %s check errored", label)
+                    return (label, "warn", "check itself errored: %s" % exc)
+
+            checks = [safe("Playlist", self._hc_playlist, acct)]
+            profile = self._hc_profile(acct)
+            acc = safe("Account", self._hc_account, profile) if profile else None
+            if acc:
+                checks.append(acc)
+            ua = self._hc_user_agent(acct)
+            checks.append(safe("Live", self._hc_live, acct, profile, ua, cfg))
+            if want_vod:
+                v = safe("VOD", self._hc_vod, acct, profile, ua)
+                if v:
+                    checks.append(v)
+            results.append({"name": acct.name, "checks": checks})
+        return results
+
+    def _hc_playlist(self, acct):
+        if not acct.is_active:
+            return ("Playlist", "fail", "account is disabled in Dispatcharr")
+        st = (acct.status or "").lower()
+        msg = (acct.last_message or "").strip()
+        when = _aware_utc(acct.updated_at)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        age_h = (now - when).total_seconds() / 3600 if when else None
+        stamp = when.strftime("%m-%d %H:%M UTC") if when else "never"
+        if st in ("fetching", "parsing"):
+            return ("Playlist", "skip", "refresh in progress right now")
+        if st == "error":
+            return ("Playlist", "fail", "last refresh (%s) FAILED: %s" % (stamp, msg[:160] or "no message"))
+        if age_h is None or age_h > 26:
+            return ("Playlist", "fail", "no refresh in over a day (last: %s)" % stamp)
+        m = re.search(r"Total processed:\s*(\d+)", msg)
+        if m and int(m.group(1)) == 0:
+            return ("Playlist", "fail", "last refresh (%s) returned 0 streams" % stamp)
+        return ("Playlist", "ok", "refreshed %s%s" % (stamp, (" (%s streams)" % format(int(m.group(1)), ",")) if m else ""))
+
+    def _hc_profile(self, acct):
+        try:
+            return (acct.profiles.filter(is_default=True).first()
+                    or acct.profiles.filter(is_active=True).first())
+        except Exception:
+            return None
+
+    def _hc_account(self, profile):
+        """Account status/expiry from Dispatcharr's last account-info refresh (no API call)."""
+        try:
+            status = profile.get_account_status()
+            exp = profile.get_account_expiration()
+        except Exception:
+            return None
+        if not status and not exp:
+            return None
+        if status and str(status).lower() != "active":
+            return ("Account", "fail", "provider reports status %r" % status)
+        if exp:
+            try:
+                exp = _aware_utc(exp)
+                days = (exp - datetime.datetime.now(datetime.timezone.utc)).days
+            except (TypeError, AttributeError):
+                days = None
+            if days is not None and days < 0:
+                return ("Account", "fail", "subscription EXPIRED on %s" % exp.strftime("%Y-%m-%d"))
+            if days is not None and days <= 7:
+                return ("Account", "warn", "subscription expires in %d day(s) (%s)" % (days, exp.strftime("%Y-%m-%d")))
+            return ("Account", "ok", "Active, expires %s" % exp.strftime("%Y-%m-%d"))
+        return ("Account", "ok", "Active")
+
+    def _hc_user_agent(self, acct):
+        try:
+            return acct.get_user_agent_string()
+        except Exception:
+            return "VLC/3.0.20 LibVLC/3.0.20"
+
+    def _hc_in_use(self, profile):
+        """True when the provider's connections are all taken (someone's watching), so the
+        probe must not compete for (or kick) the slot."""
+        if not profile or not profile.max_streams:
+            return False
+        try:
+            from core.utils import RedisClient
+            from apps.m3u.connection_pool import get_profile_connection_count
+            used = get_profile_connection_count(profile, RedisClient.get_client())
+        except Exception:
+            used = int(getattr(profile, "current_viewers", 0) or 0)
+        return used >= profile.max_streams
+
+    def _hc_validate(self, url, ua):
+        """(ok, status_code, message) — Dispatcharr's own validator when available."""
+        if not url:
+            return (False, 0, "no URL")
+        try:
+            from apps.proxy.live_proxy.url_utils import validate_stream_url
+            ok, _final, code, msg = validate_stream_url(url, user_agent=ua, timeout=(5, 10))
+            return (bool(ok), code, msg)
+        except ImportError:
+            pass
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua, "Connection": "close"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return (len(r.read(1880)) > 0, r.status, "GET ok")
+        except urllib.error.HTTPError as e:
+            return (False, e.code, "HTTP %s" % e.code)
+        except Exception as e:
+            return (False, 0, type(e).__name__)
+
+    def _hc_live_url(self, stream, acct, profile):
+        try:
+            from apps.proxy.live_proxy.url_utils import _resolve_live_stream_url
+            return _resolve_live_stream_url(stream, acct, profile)
+        except Exception:
+            pass
+        if acct.account_type == "XC" and stream.stream_id:
+            base = (acct.server_url or "").rstrip("/")
+            return "%s/live/%s/%s/%s.ts" % (base, acct.username, acct.password, stream.stream_id)
+        return stream.url
+
+    def _hc_live(self, acct, profile, ua, cfg):
+        if self._hc_in_use(profile):
+            return ("Live", "skip", "provider in use (someone's watching) — not tested")
+        ids = list(ChannelStream.objects.filter(
+            stream__m3u_account=acct, channel__channel_number__lt=cfg.get("ppv_number_start", 90000),
+        ).values_list("stream_id", flat=True).distinct()[:5000])
+        attempts = []
+        for sid in random.sample(ids, min(3, len(ids))):
+            stream = Stream.objects.filter(id=sid).first()
+            if not stream:
+                continue
+            ok, code, msg = self._hc_validate(self._hc_live_url(stream, acct, profile), ua)
+            attempts.append((ok, code, msg, stream.name))
+            if ok:
+                break
+        return _summarize_attempts("Live", attempts, "live is down or blocked from this exit")
+
+    def _hc_vod(self, acct, profile, ua):
+        props = acct.custom_properties if isinstance(acct.custom_properties, dict) else {}
+        if acct.account_type != "XC" or not props.get("enable_vod"):
+            return None
+        if self._hc_in_use(profile):
+            return ("VOD", "skip", "provider in use (someone's watching) — not tested")
+        try:
+            from apps.vod.models import M3UMovieRelation, M3UVODCategoryRelation
+        except Exception:
+            return None
+        cats = list(M3UVODCategoryRelation.objects.filter(m3u_account=acct, enabled=True).values_list("category_id", flat=True))
+        ids = list(M3UMovieRelation.objects.filter(m3u_account=acct, category_id__in=cats).values_list("id", flat=True)[:5000])
+        attempts = []
+        for rid in random.sample(ids, min(3, len(ids))):
+            rel = M3UMovieRelation.objects.select_related("movie").filter(id=rid).first()
+            if not rel:
+                continue
+            try:
+                url = rel.get_stream_url(profile)
+            except Exception:
+                url = None
+            ok, code, msg = self._hc_validate(url, ua)
+            attempts.append((ok, code, msg, rel.movie.name if rel.movie else rel.stream_id))
+            if ok:
+                break
+        return _summarize_attempts("VOD", attempts, "VOD may be blocked from this VPN exit")
+
     def _refresh_accounts(self, accounts, timeout=REFRESH_TIMEOUT_SECS):
         """Refresh M3U accounts ONE AT A TIME and wait for each to finish, so groups just
         enabled get their streams imported (Dispatcharr only imports ENABLED groups, and new
@@ -2941,6 +3241,12 @@ class Plugin:
             close_old_connections()
             self._release_lock()
             self._notify_gotify(cfg, ok, notify_body, changed)
+        # Provider health check runs LAST: a VOD probe can make a provider refuse new
+        # connections for a few minutes, so it must not precede the governance refresh.
+        try:
+            self._scheduled_health(cfg, datestr)
+        except Exception:
+            logger.exception("failovarr provider health check failed")
 
     def _ppv_tick(self, cfg):
         """OPTIONAL intra-day PPV refresh, for clients that pull the playlist more than
@@ -3023,7 +3329,7 @@ class Plugin:
             cutoff = time.time() - 8 * 86400
             for fn in os.listdir(SCHED_DIR):
                 fp = os.path.join(SCHED_DIR, fn)
-                if fn.startswith("success-") and os.path.isfile(fp) and os.path.getmtime(fp) < cutoff:
+                if fn.startswith(("success-", "health-")) and os.path.isfile(fp) and os.path.getmtime(fp) < cutoff:
                     os.remove(fp)
         except Exception:
             pass

@@ -280,6 +280,8 @@ After installing, enable Failovarr and configure:
   Dispatcharr's *auto-enable new groups* off. Off = dormant.
 - **↳ Auto mode** — auto-enable the new groups your foreign filter keeps and reconcile
   them in, every run. Off = manual (you approve via the action buttons).
+- **Nightly provider health check** (+ **↳ Include the VOD check**) — see
+  [Provider health check](#provider-health-check). On by default; alerts only on failure.
 - **↳ Refresh playlist after enabling new groups** — when groups are enabled, refresh that
   provider's playlist and wait so their channels import in the same run (otherwise they
   arrive with the next regular refresh). On by default.
@@ -314,6 +316,28 @@ Because each profile is a separate HDHR device (unique `DeviceID`), you can defi
 lineups (`plex`, `kids`, `sports`…) and add each as its own tuner. The M3U variant is
 `http://<dispatcharr-host>/output/m3u/plex` if a client prefers a playlist over HDHR.
 
+## Provider health check
+
+A VPN exit that a provider blocks, an expired sub, or a provider outage often shows up
+only when someone presses play. At the end of each nightly run Failovarr checks every
+configured provider and **Gotifies only if something is wrong** (every night until it's
+fixed):
+
+- **Playlist** — did the last playlist refresh succeed, did it actually run in the last
+  day, and did it return streams?
+- **Account** — is the subscription still Active and not about to expire (warns at ≤7
+  days)? Read from Dispatcharr's last account-info refresh; no extra request.
+- **Live** — open up to 3 real live channels; passes if any returns video.
+- **VOD** — request the first bytes of up to 3 movies; catches "live works but VOD is
+  blocked from this VPN server".
+
+It uses Dispatcharr's own URL building and stream validator, so every request takes the
+provider's real path (your VPN, a split-exit proxy, …) with the account's user-agent —
+exactly as playback would. The live/VOD tests are **skipped if someone is watching** on
+that provider, so they never compete for (or kick) a single-connection slot. It runs
+**last** in the nightly run because some providers hold an abandoned VOD session for a few
+minutes and refuse new connections meanwhile. Run it any time with **Check providers now**.
+
 ## Actions
 
 - **Preview (dry-run)** — reports exactly what the reconcile would change, writes
@@ -329,6 +353,7 @@ lineups (`plex`, `kids`, `sports`…) and add each as its own tuner. The M3U var
   kept channels in.
 - **Dismiss new groups** — accept all pending new groups into the baseline *without*
   enabling any (they stop being flagged and stay disabled).
+- **Check providers now** — run the provider health check on demand and show the result.
 - **Seed / reset** — delete all Failovarr-owned channels and rebuild from scratch (for
   the initial build or a deliberate clean re-seed only).
 - **View last results** · **Clear operation lock**.

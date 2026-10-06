@@ -361,6 +361,66 @@ def test_brand_prefix_with_ampersand():
         fv._consolidation_key("US| ZONA TUDN", RA, True, frozenset())
 
 
+# --- provider health check -------------------------------------------------------
+def test_summarize_attempts():
+    assert fv._summarize_attempts("Live", [])[1] == "skip"
+    lab, st, d = fv._summarize_attempts("Live", [(False, 404, "x", "A"), (True, 200, "ok", "ESPN")])
+    assert (lab, st) == ("Live", "ok") and "ESPN" in d          # any pass = pass
+    lab, st, d = fv._summarize_attempts("VOD", [(False, 404, "x", "m1"), (False, 404, "x", "m2"),
+                                                (False, 0, "Timeout", "m3")], "VOD may be blocked")
+    assert st == "fail" and "0/3" in d and "404, 404" in d and "blocked" in d
+
+
+def test_health_problem_title_and_lines():
+    ok = {"name": "trex", "checks": [("Playlist", "ok", "refreshed"), ("Live", "ok", "200 — ESPN")]}
+    bad = {"name": "strong", "checks": [("Playlist", "ok", "refreshed"), ("Live", "skip", "in use"),
+                                        ("VOD", "fail", "0/3 reachable: 404, 404, 404")]}
+    warn = {"name": "x", "checks": [("Account", "warn", "expires in 3 day(s)")]}
+    assert fv._health_problem([ok]) is False
+    assert fv._health_problem([ok, {"name": "y", "checks": [("Live", "skip", "in use")]}]) is False  # skip != problem
+    assert fv._health_problem([ok, bad]) is True and fv._health_problem([warn]) is True
+    t = fv._health_title([ok, bad])
+    assert "strong VOD" in t and "trex" not in t
+    ls = fv._health_lines([ok, bad])
+    assert ls[0] == "trex" and "strong" in ls and "" in ls      # one block per provider
+    assert any(l.startswith("  \u2716 VOD") for l in ls)        # ✖ marker, one check per line
+
+
+def _fake_acct(status="success", age_h=3, msg="Processing completed. Total processed: 9916.", active=True):
+    import datetime as _d, types as _t
+    when = _d.datetime.now(_d.timezone.utc) - _d.timedelta(hours=age_h)
+    return _t.SimpleNamespace(is_active=active, status=status, last_message=msg, updated_at=when)
+
+
+def test_hc_playlist():
+    p = fv.Plugin.__new__(fv.Plugin)
+    assert p._hc_playlist(_fake_acct())[1] == "ok"
+    assert "9,916" in p._hc_playlist(_fake_acct())[2]
+    assert p._hc_playlist(_fake_acct(status="error", msg="player_api 404"))[1] == "fail"
+    assert p._hc_playlist(_fake_acct(age_h=30))[1] == "fail"                      # missed a day
+    assert p._hc_playlist(_fake_acct(msg="Total processed: 0"))[1] == "fail"       # empty pull
+    assert p._hc_playlist(_fake_acct(status="parsing"))[1] == "skip"
+    assert p._hc_playlist(_fake_acct(active=False))[1] == "fail"
+    # naive timestamps must not crash (normalized to UTC)
+    import datetime as _d
+    a = _fake_acct(); a.updated_at = a.updated_at.replace(tzinfo=None)
+    assert p._hc_playlist(a)[1] == "ok"
+
+
+def test_hc_account():
+    import datetime as _d, types as _t
+    p = fv.Plugin.__new__(fv.Plugin)
+    now = _d.datetime.now(_d.timezone.utc)
+    def prof(status, days):
+        exp = now + _d.timedelta(days=days) if days is not None else None
+        return _t.SimpleNamespace(get_account_status=lambda: status, get_account_expiration=lambda: exp)
+    assert p._hc_account(prof("Active", 200))[1] == "ok"
+    assert p._hc_account(prof("Active", 3))[1] == "warn"
+    assert p._hc_account(prof("Active", -1))[1] == "fail"
+    assert p._hc_account(prof("Banned", 200))[1] == "fail"
+    assert p._hc_account(prof(None, None)) is None                                  # no info -> no line
+
+
 def test_govt_block():
     # header carries the true count; one bullet line per item; no tail under the cap
     items = [("trex", "live", "US| A"), ("strong", "vod", "EN - B")]

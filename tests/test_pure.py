@@ -456,6 +456,15 @@ def test_read_window_nothing_arrived():
     assert fv._read_window(chunks, clock, 0.0, 10, 10**9)[0] is None
 
 
+def test_is_task_worker():
+    assert fv._is_task_worker(["/dispatcharrpy/bin/celery", "-A", "dispatcharr", "worker"])
+    assert fv._is_task_worker(["/usr/bin/python", "/venv/lib/celery/__main__.py", "beat"])
+    assert not fv._is_task_worker(["uwsgi"])
+    assert not fv._is_task_worker(["/dispatcharrpy/bin/daphne", "-b", "0.0.0.0"])
+    assert not fv._is_task_worker(["manage.py", "shell", "--celery-note"])
+    assert not fv._is_task_worker([])
+
+
 def test_speed_verdict():
     st, d = fv._speed_verdict("ok", "200 — 9.5 Mbps — movie", 9.5, 15)
     assert st == "warn" and "below 15 Mbps" in d

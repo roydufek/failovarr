@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.4
+
+- **Fix: the nightly run could start inside a Dispatcharr background worker.** Dispatcharr
+  loads plugins in every Celery worker it spins up, and each copy started Failovarr's
+  scheduler. Whichever process noticed 10:00 first ran the job — sometimes a Celery worker,
+  where the run's log lines never reach the Dispatcharr log, and which Celery can shut down
+  when idle (mid-run). The scheduler now runs only in the web workers, so every run is logged
+  and can't be cut short by worker autoscaling. No setting changes.
+
 ## v0.5.3
 
 - **Provider health check now measures speed.** The **VOD** check reads ~8 s of a real movie

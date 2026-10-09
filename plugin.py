@@ -52,6 +52,7 @@ import logging
 import os
 import random
 import re
+import sys
 import threading
 import time
 import unicodedata
@@ -78,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -866,6 +867,20 @@ def _ppv_parse(name):
         canon = " ".join(t.upper() for t in best_alpha)
         return {"key": "T:" + canon, "status": status, "title": re.sub(r"\s+", " ", best).strip()}
     return None
+
+
+def _is_task_worker(argv):
+    """True inside a Celery process (worker, autoscale child, beat). Dispatcharr loads
+    plugins in every Celery child it forks, but those come and go with load (a run could
+    be killed mid-reconcile) and their plugin log lines never reach the container log —
+    so the scheduler must live in the long-lived web workers only."""
+    for a in list(argv or [])[:3]:
+        a = str(a)
+        if os.path.basename(a) in ("celery", "celery.exe"):
+            return True
+        if a.replace("\\", "/").endswith("/celery/__main__.py"):
+            return True
+    return False
 
 
 def _now():
@@ -3234,6 +3249,8 @@ class Plugin:
 
     # ------------------------------------------------------------- scheduler
     def _ensure_scheduler(self):
+        if _is_task_worker(sys.argv):
+            return
         for t in threading.enumerate():
             if t.name == "failovarr-sched" and t.is_alive():
                 return

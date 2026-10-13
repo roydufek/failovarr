@@ -456,6 +456,59 @@ def test_read_window_nothing_arrived():
     assert fv._read_window(chunks, clock, 0.0, 10, 10**9)[0] is None
 
 
+def test_event_slot_formats():
+    es = fv._event_slot
+    assert es("NFL  | 05 - 1pm Bears at Packers") == ("NFL", 5, "1pm Bears at Packers")
+    assert es("NFL  | 13 -") == ("NFL", 13, "")
+    assert es("NHL | 03 - 8pm Golden Knights at Wild")[:2] == ("NHL", 3)
+    assert es("NCAAF 52: 7PM Jacksonville State at Eastern Michigan")[:2] == ("NCAAF", 52)
+    assert es("NCAAF 19:") == ("NCAAF", 19, "")
+    assert es("MLB 01 : Dodgers x Brewers start:2026-10-12 01:00:00")[:2] == ("MLB", 1)
+    assert es("NBA 09 :") == ("NBA", 9, "")
+    assert es("MLB 13 | Baltimore vs Tampa Bay @ Aug 14 7:00 PM")[:2] == ("MLB", 13)
+    assert es("TC+ 100:") == ("TC+", 100, "")
+    assert es(":MLS  07") == ("MLS", 7, "")
+    assert es(":NCAAB  04") == ("NCAAB", 4, "")
+    sl = es("St Louis CITY SC vs LA Galaxy @ Oct 11 6:30 PM :MLS  01")
+    assert sl[:2] == ("MLS", 1) and sl[2].startswith("St Louis CITY SC vs LA Galaxy")
+    sl = es("NEXT | UTA - JAZZ VS SAS - SPURS | Mon 12 Oct 20:00 EDT (US) | 8K EXCLUSIVE | US: NBA PASS PPV 9")
+    assert sl[:2] == ("NBA PASS PPV", 9) and "JAZZ VS SAS" in sl[2]
+    assert es("- NO EVENT STREAMING - | 8K EXCLUSIVE | US: NBA PASS PPV 11")[:2] == ("NBA PASS PPV", 11)
+    assert es("US| NHL | 04 - 7pm Mammoth at Devils")[:2] == ("NHL", 4)   # region prefix stripped
+
+
+def test_event_slot_rejects_real_channels():
+    es = fv._event_slot
+    for name in ("US| SPECTRUM NEWS 13", "SKY SPORT 3", "F1: Qualifying", "F1 | Race Replay",
+                 "US| 007: ROAD TO A MILLION", "NFL REPLAY 12 HD", "NBA TEAM| CHARLOTTE HORNETS",
+                 "US| MLB BOSTON RED SOX HD", "ESPN 2", "US| BIG BROTHER CAMERA 4", "WNBA 10", ""):
+        assert es(name) is None, name
+
+
+def test_slot_families_need_a_series():
+    slots = [fv._event_slot(n) for n in (
+        "NFL  | 01 -", "NFL  | 02 - 1pm Bears at Packers", "NFL  | 03 -",
+        "US| SPECTRUM NEWS 1 - SO CAL",            # slot-shaped, but a lone channel
+        "NBA 01 :", "NBA 02 :",                    # only two numbers: not a series
+        "US| SKY SPORT 3")]
+    assert fv._slot_families(slots) == {"NFL"}
+
+
+def test_slot_key_and_display():
+    sl = ("NFL", 5, "1pm Bears at Packers")
+    assert fv._slot_key(sl, "trex") == "SLOT|trex|NFL|5"
+    assert fv._slot_key(("nfl", 5, ""), "trex") == "SLOT|trex|NFL|5"   # case-stable
+    assert fv._slot_display(sl) == "NFL 05 - 1pm Bears at Packers"
+    assert fv._slot_display(sl, idle=True) == "NFL 05"
+    assert fv._slot_display(("TC+", 100, "")) == "TC+ 100"
+    assert "|" not in fv._consolidation_key("NFL 05", set(), True)        # no collision with name keys
+
+
+def test_health_title_all_ok_has_no_warning():
+    ok = {"name": "trex", "checks": [("Live", "ok", "")]}
+    assert fv._health_title([ok]) == "Failovarr provider check: all OK"
+
+
 def test_is_task_worker():
     assert fv._is_task_worker(["/dispatcharrpy/bin/celery", "-A", "dispatcharr", "worker"])
     assert fv._is_task_worker(["/usr/bin/python", "/venv/lib/celery/__main__.py", "beat"])

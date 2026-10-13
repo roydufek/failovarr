@@ -74,6 +74,14 @@ So the matcher is a **normalize-and-group**, not fuzzy scoring:
 - **PPV / event groups are skipped** by the normal consolidation (see
   [PPV](#ppv--live-event-failover)) — their dated one-off names would spawn thousands
   of stale channels.
+- **Event slots stay put.** Some providers sell league packages as numbered slot
+  channels whose *name* carries the day's game (`NFL | 05 - 1pm Bears at Packers`,
+  `NCAAF 52: …`, `:MLS 07`, `… | US: NBA PASS PPV 9`). Keyed by name, each new game would
+  make a new channel. Failovarr recognises a slot package (a series of ≥3 numbered slots
+  from one provider) and keeps **one channel per slot** — steady number for guides/DVR,
+  only the name follows the event, idle slots kept. Slots never pair across providers
+  (slot 05 on one provider isn't slot 05's game on another); for same-game failover,
+  point the PPV feature at those groups instead.
 - **Foreign channels are filtered** — by country prefix *and* non-Latin script — so a
   German or Arabic feed never pollutes the list, while US-market channels (including
   Spanish-language networks like Telemundo/Univision) are kept.
@@ -245,6 +253,9 @@ After installing, enable Failovarr and configure:
   **enabled groups** are considered.
 - **Skip these groups (regex)** — PPV/event groups to leave to the PPV feature or
   native auto-sync.
+- **Keep event slots as fixed channels** (default on) — one steady channel per league
+  package slot; its name follows the day's event. Off = keyed by name (a new channel
+  whenever the event changes).
 - **Include 24/7 channels** · **Filter foreign-country channels** / **Always keep
   US-market channels** · **Region prefixes to strip** · **Merge quality variants**
   (HD + 4K → one) · **Skip junk/divider names**.

@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.6.0
+
+- **Event slots are now fixed channels.** Providers sell league packages as numbered slot
+  channels whose name carries the day's game (`NFL | 05 - 1pm Bears at Packers`,
+  `NCAAF 52: …`, `:MLS 07`, `… | US: NBA PASS PPV 9`, `TC+ 100:`). Matched by name, every new
+  game made a new channel (new number, nightly create/prune churn). Failovarr now spots a slot
+  *package* — at least 3 numbered slots with the same label from one provider — and keeps
+  one channel per slot: the number stays, only the name follows the event, and idle slots
+  ("NO EVENT STREAMING") are kept as e.g. `NBA PASS PPV 11` instead of disappearing. Slots
+  never pair across providers (slot numbers don't line up between providers); for same-game
+  failover, point the PPV feature's group match at those groups.
+  New setting **Keep event slots as fixed channels** (default **on**). Upgrading adopts the
+  channels that already exist for those slots, so they keep their numbers. Manual renames
+  are still respected.
+- Provider-check log line no longer shows ⚠️ when everything passed.
+
 ## v0.5.4
 
 - **Fix: the nightly run could start inside a Dispatcharr background worker.** Dispatcharr

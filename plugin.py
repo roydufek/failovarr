@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.5.4"
+__version__ = "0.6.0"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -168,6 +168,7 @@ _SCHED_DEFAULTS = {
     "channel_group_name": "Failovarr",
     "merge_group_suffixes": True,
     "locals_by_name": True,
+    "stable_event_slots": True,
     "group_governance": False,
     "group_governance_auto": False,
     "governance_refresh": True,
@@ -698,7 +699,9 @@ def _health_title(results):
         labels = [l for (l, st, _d) in r["checks"] if st in ("fail", "warn")]
         if labels:
             bad.append("%s %s" % (r["name"], "/".join(labels)))
-    return "Failovarr ⚠️ provider check: " + ("; ".join(bad) if bad else "all OK")
+    if not bad:
+        return "Failovarr provider check: all OK"
+    return "Failovarr ⚠️ provider check: " + "; ".join(bad)
 
 
 def _health_lines(results):
@@ -721,6 +724,71 @@ def _display_name(name, region_allow, dup_prefixes=frozenset()):
         s = body
     s = re.sub(r"\s+", " ", s).strip()
     return s or (name or "").strip()
+
+
+# ---------------------------------------------------------------- event slots
+# Providers sell league "packages" as numbered slot channels whose NAME carries the
+# day's event ("NFL | 05 - 1pm Bears at Packers", "NCAAF 52: …", ":MLS  07",
+# "NEXT | … | US: NBA PASS PPV 9"). Keyed by name, a slot becomes a new channel every
+# time its event changes. Keyed by (provider, label, number) it stays one channel and
+# only its name follows the event. Slot numbers are NOT comparable across providers, so
+# a slot never pairs with another provider's slot (same-game failover = the PPV engine).
+_SLOT_LABEL = r"([A-Za-z][A-Za-z0-9+&.' ]{0,24}?)"
+_SLOT_LEAD = re.compile(r"^" + _SLOT_LABEL + r"(?:\s+|\s*\|\s*)(\d{1,3})\s*(?::|\|\s|\|$|-\s|-$)(.*)$", re.I)
+_SLOT_BARE = re.compile(r"^:\s*" + _SLOT_LABEL + r"\s+(\d{1,3})\s*$", re.I)
+_SLOT_TRAIL = re.compile(r"^(.*?)\s:\s*" + _SLOT_LABEL + r"\s+(\d{1,3})\s*$", re.I)
+_SLOT_TRAIL_CC = re.compile(r"^(.*?)\|\s*[A-Z]{2}:\s*" + _SLOT_LABEL + r"\s+(\d{1,3})\s*$")
+_SLOT_REGION = re.compile(r"^\W*[A-Z]{2}\s*[|:]\s*")
+_SLOT_MIN_FAMILY = 3  # a label counts as a slot family only with >= this many numbers
+
+
+def _event_slot(name):
+    """(label, number, event_text) when the stream name has a numbered-slot shape, else
+    None. Region prefixes ("US|", "US:") are stripped first; event_text is "" for an
+    empty slot. Shape alone isn't proof — `_slot_families` requires a series."""
+    s = _fold(name or "").strip()
+    if not s.startswith(":"):
+        s = _SLOT_REGION.sub("", s)
+    m = _SLOT_LEAD.match(s)
+    if m:
+        label, num, rest = m.group(1), m.group(2), m.group(3)
+    else:
+        m = _SLOT_BARE.match(s)
+        if m:
+            label, num, rest = m.group(1), m.group(2), ""
+        else:
+            m = _SLOT_TRAIL.match(s) or _SLOT_TRAIL_CC.match(s)
+            if not m:
+                return None
+            rest, label, num = m.group(1), m.group(2), m.group(3)
+    label = re.sub(r"\s+", " ", label).strip()
+    rest = re.sub(r"\s+", " ", rest).strip(" |:-@")
+    if not label:
+        return None
+    return (label, int(num), rest)
+
+
+def _slot_families(slots):
+    """Labels (upper-cased) seen with >= _SLOT_MIN_FAMILY distinct numbers among one
+    provider's slots — a real slot package is a series (NFL 01…16); a lone "SPECTRUM
+    NEWS 1" is just a channel name with a number in it."""
+    nums = {}
+    for sl in slots:
+        if sl:
+            nums.setdefault(sl[0].upper(), set()).add(sl[1])
+    return {lab for lab, ns in nums.items() if len(ns) >= _SLOT_MIN_FAMILY}
+
+
+def _slot_key(slot, provider):
+    """Stable keymap key for a slot channel (never collides with a name key — those
+    are space-joined tokens with no '|')."""
+    return "SLOT|%s|%s|%d" % (provider, slot[0].upper(), slot[1])
+
+
+def _slot_display(slot, idle=False):
+    """'NFL 05' for an empty/idle slot, 'NFL 05 - 1pm Bears at Packers' with an event."""
+    base = "%s %02d" % (slot[0], slot[1])
+    return base if (idle or not slot[2]) else "%s - %s" % (base, slot[2])
 
 
 # Generic trailing words dropped from group labels when merge_group_suffixes is on,
@@ -1093,6 +1161,20 @@ class Plugin:
                     "Groups whose name matches are skipped entirely — PPV/event feeds "
                     "with dated one-off names. Hand those to Dispatcharr's native "
                     "auto-channel-sync, not Failovarr."
+                ),
+            },
+            {
+                "id": "stable_event_slots",
+                "label": "Keep event slots as fixed channels",
+                "type": "boolean",
+                "default": True,
+                "help_text": (
+                    "League 'package' slot channels (NFL | 05 - …, NCAAF 52: …, :MLS 07) "
+                    "carry the day's game in their name. ON: each slot stays ONE channel "
+                    "(steady number for guides/DVR) and only its name follows the event; "
+                    "idle slots are kept. Slots stay per provider — slot numbers don't "
+                    "match across providers (same-game failover is the PPV feature's job). "
+                    "OFF: keyed by name, so a slot becomes a new channel when its event changes."
                 ),
             },
             {
@@ -1670,6 +1752,18 @@ class Plugin:
             )
             keymap = {k: v for k, v in keymap.items() if v["id"] in live}
 
+        # Event slots: adopt the channel the name-based engine made for this slot's
+        # current stream (first run with slots on) instead of pruning + recreating it,
+        # so it keeps its channel number.
+        gstats["slots_adopted"] = 0
+        for k, b in buckets.items():
+            if b.get("slot") and k not in keymap:
+                for old in sorted(b.get("legacy") or ()):
+                    if old in keymap and old not in buckets:
+                        keymap[k] = keymap.pop(old)
+                        gstats["slots_adopted"] += 1
+                        break
+
         desired = set(buckets)
         existing = set(keymap)
         to_create = sorted(desired - existing)
@@ -1715,6 +1809,8 @@ class Plugin:
                 "single_source": gstats["single"],
                 "adult": gstats["adult"],
                 "locals_by_callsign": gstats["locals"],
+                "event_slots": gstats["slots"],
+                "event_slots_adopted": gstats["slots_adopted"],
                 "channels_existing": len(existing),
                 "channels_to_create": len(to_create),
                 "channels_to_prune": len(to_prune),
@@ -1830,7 +1926,7 @@ class Plugin:
         buckets = {}
         stats = {
             "scanned": 0, "skip_event": 0, "skip_foreign": 0, "skip_junk": 0,
-            "skip_stale": 0, "pairs": 0, "single": 0, "adult": 0, "locals": 0,
+            "skip_stale": 0, "pairs": 0, "single": 0, "adult": 0, "locals": 0, "slots": 0,
         }
         skip_re = _compile(cfg["skip_re"])
         adult_re = _compile(cfg["adult_re"])
@@ -1849,6 +1945,9 @@ class Plugin:
             qs = Stream.objects.filter(m3u_account=acct, channel_group_id__in=list(gid_name))
             if cfg["skip_stale"]:
                 qs = qs.exclude(is_stale=True)
+            # Pass 1: group-level filters (+ foreign) and slot detection, so slot
+            # families can be judged on this provider's surviving streams as a whole.
+            rows = []
             for pk, name, gid, s_adult in qs.values_list("id", "name", "channel_group_id", "is_adult").iterator():
                 stats["scanned"] += 1
                 gname = gid_name.get(gid, "") or ""
@@ -1862,14 +1961,56 @@ class Plugin:
                 if not cfg["include_247"] and _fold(gname).lstrip().upper().startswith(("24/7", "24 7", "247")):
                     stats["skip_event"] += 1
                     continue
-                if cfg["skip_junk"] and _is_junk(name):
-                    stats["skip_junk"] += 1
-                    continue
                 if cfg["filter_foreign"] and _group_is_foreign(name, region_allow, cfg["keep_us_market"]):
                     stats["skip_foreign"] += 1
                     continue
+                slot = _event_slot(name) if cfg["stable_slots"] else None
+                if slot is not None:
+                    # "FOX 5 - NEW YORK" is a local station (keyed by callsign), not a slot.
+                    net = _local_network(gname) or (cfg["locals_by_name"] and _local_network(name))
+                    if net and _callsign(name):
+                        slot = None
+                rows.append((pk, name, gid, s_adult, gname, slot))
+            families = _slot_families(r[5] for r in rows)
+
+            # Pass 2: key and bucket.
+            for pk, name, gid, s_adult, gname, slot in rows:
+                if slot is not None and slot[0].upper() not in families:
+                    slot = None
+                # An idle slot ("NO EVENT STREAMING") is junk as a channel name, but the
+                # slot's channel must survive idle days — keep it, shown as "NBA PASS PPV 11".
+                idle = cfg["skip_junk"] and _is_junk(name)
+                if idle and slot is None:
+                    stats["skip_junk"] += 1
+                    continue
 
                 is_adult = bool(s_adult) or bool(adult_re and adult_re.search(gname))
+
+                if slot is not None:
+                    # Event slot: one channel per (provider, label, number); the name
+                    # follows the event. "legacy" = the key the name-based engine would
+                    # have used today, so an existing channel can be adopted, not recreated.
+                    skey = _slot_key(slot, acct.name)
+                    disp = _slot_display(slot, idle)
+                    legacy = None if idle else _consolidation_key(
+                        name, region_allow, cfg["merge_quality"], cfg["dup_prefixes"])
+                    b = buckets.get(skey)
+                    if b is None:
+                        b = buckets[skey] = {
+                            "display": disp, "is_adult": is_adult, "epg_key": "",
+                            "callsign": None,
+                            "group": _group_display(gname, cfg["merge_group_suffixes"], cfg["group_aliases"]),
+                            "prov": {}, "dup_src": False,
+                            "slot": (slot[0].upper(), acct.name), "legacy": set(), "idle": idle,
+                        }
+                    else:
+                        b["is_adult"] = b["is_adult"] or is_adult
+                        if b["idle"] and not idle:  # a live stream names the slot
+                            b["display"], b["idle"] = disp, False
+                    if legacy:
+                        b["legacy"].add(legacy)
+                    b["prov"].setdefault(idx, []).append((_quality_rank(name), pk))
+                    continue
 
                 # Local station? key on callsign (network + callsign). Detect the
                 # network from the GROUP (ABC/NBC/CBS/FOX network groups) and — when
@@ -1939,6 +2080,17 @@ class Plugin:
                 stats["adult"] += 1
             if b.get("callsign"):  # local station keyed on callsign
                 stats["locals"] += 1
+        # Slot channels never pair across providers, so the same package from two
+        # providers would show twice under one name — tag those with the provider.
+        slot_provs = {}
+        for b in buckets.values():
+            if b.get("slot"):
+                slot_provs.setdefault(b["slot"][0], set()).add(b["slot"][1])
+        for b in buckets.values():
+            if b.get("slot"):
+                stats["slots"] += 1
+                if len(slot_provs[b["slot"][0]]) > 1:
+                    b["display"] = "%s (%s)" % (b["display"], b["slot"][1])
         return buckets, stats
 
     def _ordered_streams(self, bucket, nproviders):
@@ -2255,6 +2407,8 @@ class Plugin:
         candidate is an EXACT index hit — no fuzzy scoring, so no confident-but-wrong
         guides."""
         ek = bucket["epg_key"]
+        if not ek:  # event-slot channels carry no guide key
+            return None
         toks = ek.split()
         cands = [ek]
         # timeshift feed -> base guide (East/West/Pacific share the same schedule)
@@ -2478,6 +2632,7 @@ class Plugin:
             "merge_group_suffixes": bool(settings.get("merge_group_suffixes", True)),
             "group_aliases": _parse_group_aliases(settings.get("group_aliases", _GROUP_ALIAS_DEFAULT)),
             "locals_by_name": bool(settings.get("locals_by_name", True)),
+            "stable_slots": bool(settings.get("stable_event_slots", True)),
             "group_governance": bool(settings.get("group_governance", False)),
             "group_governance_auto": bool(settings.get("group_governance_auto", False)),
             "governance_refresh": bool(settings.get("governance_refresh", True)),
@@ -3188,6 +3343,8 @@ class Plugin:
                 (s.get("single_source"), "single-source"),
                 (s.get("adult"), "adult"),
                 (s.get("locals_by_callsign"), "locals"),
+                (s.get("event_slots") or None, "event slots (fixed)"),
+                (s.get("event_slots_adopted") or None, "slots kept their existing channel"),
             ])
             created = s.get("created", s.get("channels_to_create"))
             updated = s.get("updated")

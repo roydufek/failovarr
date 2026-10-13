@@ -504,6 +504,14 @@ def test_slot_key_and_display():
     assert "|" not in fv._consolidation_key("NFL 05", set(), True)        # no collision with name keys
 
 
+def test_slot_settings_defaults():
+    # Fixed slots on by default; routing them to PPV is opt-in (would hide them without PPV).
+    assert fv._SCHED_DEFAULTS["stable_event_slots"] is True
+    assert fv._SCHED_DEFAULTS["event_slots_to_ppv"] is False
+    ids = [f["id"] for f in fv.Plugin.__new__(fv.Plugin).fields]
+    assert ids.index("event_slots_to_ppv") == ids.index("stable_event_slots") + 1
+
+
 def test_health_title_all_ok_has_no_warning():
     ok = {"name": "trex", "checks": [("Live", "ok", "")]}
     assert fv._health_title([ok]) == "Failovarr provider check: all OK"

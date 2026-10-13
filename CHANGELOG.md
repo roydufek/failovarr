@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.1
+
+- **New option: Send event slots to PPV instead** (default off; needs PPV events on). The
+  event slots from v0.6.0 leave the regular lineup and become PPV events, where the **same
+  game on two providers pairs as failover** — matched by the event, never by slot number.
+  Only the slots move: team channels, replays and anything else in the same groups stay in
+  the regular lineup (routing whole groups to PPV would drop them). The lineup and the PPV
+  feature use one shared slot detector, so a stream is always in exactly one of the two.
+
 ## v0.6.0
 
 - **Event slots are now fixed channels.** Providers sell league packages as numbered slot

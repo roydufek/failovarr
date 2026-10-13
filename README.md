@@ -81,7 +81,7 @@ So the matcher is a **normalize-and-group**, not fuzzy scoring:
   from one provider) and keeps **one channel per slot** — steady number for guides/DVR,
   only the name follows the event, idle slots kept. Slots never pair across providers
   (slot 05 on one provider isn't slot 05's game on another); for same-game failover,
-  point the PPV feature at those groups instead.
+  turn on **Send event slots to PPV** (below).
 - **Foreign channels are filtered** — by country prefix *and* non-Latin script — so a
   German or Arabic feed never pollutes the list, while US-market channels (including
   Spanish-language networks like Telemundo/Univision) are kept.
@@ -256,6 +256,11 @@ After installing, enable Failovarr and configure:
 - **Keep event slots as fixed channels** (default on) — one steady channel per league
   package slot; its name follows the day's event. Off = keyed by name (a new channel
   whenever the event changes).
+- **↳ Send event slots to PPV instead** (default off; needs PPV events on) — the slots
+  leave the regular lineup and become PPV events, so the **same game on two providers
+  pairs as failover** (matched by the event, not the slot number). Team, replay and other
+  channels in the same groups stay put. Use it when your providers carry the same games;
+  idle slots then disappear until they carry an event, like any PPV event.
 - **Include 24/7 channels** · **Filter foreign-country channels** / **Always keep
   US-market channels** · **Region prefixes to strip** · **Merge quality variants**
   (HD + 4K → one) · **Skip junk/divider names**.

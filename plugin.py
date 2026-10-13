@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -169,6 +169,7 @@ _SCHED_DEFAULTS = {
     "merge_group_suffixes": True,
     "locals_by_name": True,
     "stable_event_slots": True,
+    "event_slots_to_ppv": False,
     "group_governance": False,
     "group_governance_auto": False,
     "governance_refresh": True,
@@ -1178,6 +1179,19 @@ class Plugin:
                 ),
             },
             {
+                "id": "event_slots_to_ppv",
+                "label": "↳ Send event slots to PPV instead (same-game failover)",
+                "type": "boolean",
+                "default": False,
+                "help_text": (
+                    "Needs PPV events on. Event slots leave the regular lineup and become PPV "
+                    "events, where the SAME game is paired across providers as failover (matched "
+                    "by the event, not the slot number). Team, replay and other channels in the "
+                    "same groups stay in the regular lineup. Idle slots disappear until they "
+                    "carry an event, like any PPV event."
+                ),
+            },
+            {
                 "id": "include_247",
                 "label": "Include 24/7 channels",
                 "type": "boolean",
@@ -1811,6 +1825,7 @@ class Plugin:
                 "locals_by_callsign": gstats["locals"],
                 "event_slots": gstats["slots"],
                 "event_slots_adopted": gstats["slots_adopted"],
+                "event_slots_to_ppv": gstats["slots_to_ppv"],
                 "channels_existing": len(existing),
                 "channels_to_create": len(to_create),
                 "channels_to_prune": len(to_prune),
@@ -1927,56 +1942,25 @@ class Plugin:
         stats = {
             "scanned": 0, "skip_event": 0, "skip_foreign": 0, "skip_junk": 0,
             "skip_stale": 0, "pairs": 0, "single": 0, "adult": 0, "locals": 0, "slots": 0,
+            "slots_to_ppv": 0,
         }
-        skip_re = _compile(cfg["skip_re"])
         adult_re = _compile(cfg["adult_re"])
         region_allow = cfg["region_allow"]
 
         for idx, acct in enumerate(providers):
-            gid_name = dict(
-                ChannelGroup.objects.filter(
-                    id__in=ChannelGroupM3UAccount.objects.filter(
-                        m3u_account=acct, enabled=True
-                    ).values_list("channel_group_id", flat=True)
-                ).values_list("id", "name")
-            )
-            if not gid_name:
+            rows, families = self._lineup_rows(acct, cfg, stats)
+            if not rows:
                 continue
-            qs = Stream.objects.filter(m3u_account=acct, channel_group_id__in=list(gid_name))
-            if cfg["skip_stale"]:
-                qs = qs.exclude(is_stale=True)
-            # Pass 1: group-level filters (+ foreign) and slot detection, so slot
-            # families can be judged on this provider's surviving streams as a whole.
-            rows = []
-            for pk, name, gid, s_adult in qs.values_list("id", "name", "channel_group_id", "is_adult").iterator():
-                stats["scanned"] += 1
-                gname = gid_name.get(gid, "") or ""
-
-                # Skip PPV/event GROUPS (by group name only — matching the stream
-                # name too would wrongly drop legit channels that happen to contain
-                # a token like EVENT/8K).
-                if skip_re and skip_re.search(gname):
-                    stats["skip_event"] += 1
-                    continue
-                if not cfg["include_247"] and _fold(gname).lstrip().upper().startswith(("24/7", "24 7", "247")):
-                    stats["skip_event"] += 1
-                    continue
-                if cfg["filter_foreign"] and _group_is_foreign(name, region_allow, cfg["keep_us_market"]):
-                    stats["skip_foreign"] += 1
-                    continue
-                slot = _event_slot(name) if cfg["stable_slots"] else None
-                if slot is not None:
-                    # "FOX 5 - NEW YORK" is a local station (keyed by callsign), not a slot.
-                    net = _local_network(gname) or (cfg["locals_by_name"] and _local_network(name))
-                    if net and _callsign(name):
-                        slot = None
-                rows.append((pk, name, gid, s_adult, gname, slot))
-            families = _slot_families(r[5] for r in rows)
 
             # Pass 2: key and bucket.
             for pk, name, gid, s_adult, gname, slot in rows:
                 if slot is not None and slot[0].upper() not in families:
                     slot = None
+                if slot is not None and cfg["slots_to_ppv"]:
+                    stats["slots_to_ppv"] += 1  # the PPV engine carries these (same-game failover)
+                    continue
+                if slot is not None and not cfg["stable_slots"]:
+                    slot = None  # detected only for PPV routing; key by name as before
                 # An idle slot ("NO EVENT STREAMING") is junk as a channel name, but the
                 # slot's channel must survive idle days — keep it, shown as "NBA PASS PPV 11".
                 idle = cfg["skip_junk"] and _is_junk(name)
@@ -2092,6 +2076,51 @@ class Plugin:
                 if len(slot_provs[b["slot"][0]]) > 1:
                     b["display"] = "%s (%s)" % (b["display"], b["slot"][1])
         return buckets, stats
+
+    def _lineup_rows(self, acct, cfg, stats):
+        """One provider's streams that the regular lineup would consider (enabled groups,
+        not skipped, not foreign), each tagged with its event slot when slot detection is
+        on. Returns (rows, families): rows = (pk, name, gid, is_adult, group_name, slot);
+        families = slot labels that form a real package on this provider. Shared by the
+        lineup and the PPV engine so both agree exactly on what a slot is."""
+        skip_re = _compile(cfg["skip_re"])
+        region_allow = cfg["region_allow"]
+        gid_name = dict(
+            ChannelGroup.objects.filter(
+                id__in=ChannelGroupM3UAccount.objects.filter(
+                    m3u_account=acct, enabled=True
+                ).values_list("channel_group_id", flat=True)
+            ).values_list("id", "name")
+        )
+        if not gid_name:
+            return [], set()
+        qs = Stream.objects.filter(m3u_account=acct, channel_group_id__in=list(gid_name))
+        if cfg["skip_stale"]:
+            qs = qs.exclude(is_stale=True)
+        detect = cfg["stable_slots"] or cfg["slots_to_ppv"]
+        rows = []
+        for pk, name, gid, s_adult in qs.values_list("id", "name", "channel_group_id", "is_adult").iterator():
+            stats["scanned"] = stats.get("scanned", 0) + 1
+            gname = gid_name.get(gid, "") or ""
+            # Skip PPV/event GROUPS (by group name only — matching the stream name too
+            # would wrongly drop legit channels that happen to contain a token like EVENT/8K).
+            if skip_re and skip_re.search(gname):
+                stats["skip_event"] = stats.get("skip_event", 0) + 1
+                continue
+            if not cfg["include_247"] and _fold(gname).lstrip().upper().startswith(("24/7", "24 7", "247")):
+                stats["skip_event"] = stats.get("skip_event", 0) + 1
+                continue
+            if cfg["filter_foreign"] and _group_is_foreign(name, region_allow, cfg["keep_us_market"]):
+                stats["skip_foreign"] = stats.get("skip_foreign", 0) + 1
+                continue
+            slot = _event_slot(name) if detect else None
+            if slot is not None:
+                # "FOX 5 - NEW YORK" is a local station (keyed by callsign), not a slot.
+                net = _local_network(gname) or (cfg["locals_by_name"] and _local_network(name))
+                if net and _callsign(name):
+                    slot = None
+            rows.append((pk, name, gid, s_adult, gname, slot))
+        return rows, _slot_families(r[5] for r in rows)
 
     def _ordered_streams(self, bucket, nproviders):
         """Final failover order: provider 0 first, then 1, 2, …; within a provider,
@@ -2450,12 +2479,18 @@ class Plugin:
             )
             gids = [gid for gid, nm in gid_name.items()
                     if ppv_re.search(nm or "") and not (skip_re and skip_re.search(nm or ""))]
-            if not gids:
-                continue
-            qs = Stream.objects.filter(m3u_account=acct, channel_group_id__in=gids)
-            if cfg["skip_stale"]:
-                qs = qs.exclude(is_stale=True)
-            for pk, name, gid in qs.values_list("id", "name", "channel_group_id").iterator():
+            src = []
+            if gids:
+                qs = Stream.objects.filter(m3u_account=acct, channel_group_id__in=gids)
+                if cfg["skip_stale"]:
+                    qs = qs.exclude(is_stale=True)
+                src = list(qs.values_list("id", "name", "channel_group_id").iterator())
+            if cfg["slots_to_ppv"]:
+                # Event slots the regular lineup handed over (same detector, same rules).
+                rows, families = self._lineup_rows(acct, cfg, {})
+                src += [(pk, name, gid) for pk, name, gid, _a, _g, sl in rows
+                        if sl is not None and sl[0].upper() in families]
+            for pk, name, gid in src:
                 stats["scanned"] += 1
                 p = _ppv_parse(name)
                 if p is None:
@@ -2633,6 +2668,8 @@ class Plugin:
             "group_aliases": _parse_group_aliases(settings.get("group_aliases", _GROUP_ALIAS_DEFAULT)),
             "locals_by_name": bool(settings.get("locals_by_name", True)),
             "stable_slots": bool(settings.get("stable_event_slots", True)),
+            # Only meaningful with PPV on: otherwise the slots would vanish entirely.
+            "slots_to_ppv": bool(settings.get("event_slots_to_ppv", False)) and bool(settings.get("ppv_events", False)),
             "group_governance": bool(settings.get("group_governance", False)),
             "group_governance_auto": bool(settings.get("group_governance_auto", False)),
             "governance_refresh": bool(settings.get("governance_refresh", True)),
@@ -3345,6 +3382,7 @@ class Plugin:
                 (s.get("locals_by_callsign"), "locals"),
                 (s.get("event_slots") or None, "event slots (fixed)"),
                 (s.get("event_slots_adopted") or None, "slots kept their existing channel"),
+                (s.get("event_slots_to_ppv") or None, "event-slot streams sent to PPV"),
             ])
             created = s.get("created", s.get("channels_to_create"))
             updated = s.get("updated")

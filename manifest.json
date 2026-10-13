@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-09T05:55:47Z",
+  "generated_at": "2026-10-13T04:35:04Z",
   "manifest": {
     "registry_name": "roydufek/failovarr",
     "registry_url": "https://github.com/roydufek/failovarr",
@@ -14,13 +14,13 @@
         "license": "MIT",
         "manifest_url": "https://raw.githubusercontent.com/roydufek/failovarr/main/plugin-manifest.json",
         "icon_url": "https://raw.githubusercontent.com/roydufek/failovarr/main/logo.png",
-        "latest_version": "0.5.4",
-        "latest_sha256": "449051dcae6bfe185412a8368b55766cd1a2b42662f4566d5577dd9670268049",
-        "latest_url": "v0.5.4/failovarr-0.5.4.zip",
-        "latest_size": 1302569,
+        "latest_version": "0.6.0",
+        "latest_sha256": "59d62d6a0fc6f8f884ecaeb6294e7fa31c4e75ad397bcac86e31aa90583232d2",
+        "latest_url": "v0.6.0/failovarr-0.6.0.zip",
+        "latest_size": 1305993,
         "min_dispatcharr_version": "v0.20.0"
       }
     ]
   },
-  "signature": "-----BEGIN PGP SIGNATURE-----\n\niHUEABYKAB0WIQTbTK/Tr1REt41RnZhi5vxxPOMnfgUCasiB4wAKCRBi5vxxPOMn\nfrB6AP4xZpfFOE44a+9n5ik0cDVnbXCFWA8WbefCCR+sSN/V1QD/czbr0kJt1Mr1\nn0nCECyLJLPhmrNTodUER9fp2AeHBgA=\n=QMuZ\n-----END PGP SIGNATURE-----"
+  "signature": "-----BEGIN PGP SIGNATURE-----\n\niHUEABYKAB0WIQTbTK/Tr1REt41RnZhi5vxxPOMnfgUCas20+QAKCRBi5vxxPOMn\nfj1BAQDq95ZEG18m7iRPzcCKMpEs49SOLQUR5wGa66XGZ78GQwEA8hNlsEtojkXO\n7UIhcyTaPka1FzKE3NGj5Ep1ERHlrgQ=\n=yHEU\n-----END PGP SIGNATURE-----"
 }

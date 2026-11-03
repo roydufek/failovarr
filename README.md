@@ -298,6 +298,9 @@ After installing, enable Failovarr and configure:
   them in, every run. Off = manual (you approve via the action buttons).
 - **Nightly provider health check** (+ **↳ Include the VOD check**) — see
   [Provider health check](#provider-health-check). On by default; alerts only on failure.
+- **Retry a failed playlist refresh before the nightly run** (default on) — a provider whose
+  last refresh failed gets one more try before the reconcile, so a one-off provider error
+  doesn't leave you on yesterday's streams. Only runs on days something failed.
 - **↳ Refresh playlist after enabling new groups** — when groups are enabled, refresh that
   provider's playlist and wait so their channels import in the same run (otherwise they
   arrive with the next regular refresh). On by default.

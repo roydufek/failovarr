@@ -512,6 +512,41 @@ def test_slot_settings_defaults():
     assert ids.index("event_slots_to_ppv") == ids.index("stable_event_slots") + 1
 
 
+def test_retry_lines():
+    assert fv._retry_lines({}) == []
+    out = "\n".join(fv._retry_lines({"trex": "ok", "strong": "error"}))
+    assert "trex — recovered" in out
+    assert "strong — still failing (error)" in out
+
+
+def test_retry_failed_refreshes_only_failed_accounts():
+    import types as _t
+    seen = {}
+
+    class _Mgr:
+        def filter(self, **k):
+            seen.update(k)
+            return [a for a in accts if a.status == k["status"]]
+
+    accts = [_t.SimpleNamespace(id=10, name="trex", status="error"),
+             _t.SimpleNamespace(id=11, name="strong", status="success")]
+    p = fv.Plugin.__new__(fv.Plugin)
+    p._resolve_providers = lambda s: accts
+    calls = []
+    p._refresh_accounts = lambda a, why="": calls.append(([x.name for x in a], why)) or {"trex": "ok"}
+    saved = fv.M3UAccount
+    fv.M3UAccount = _t.SimpleNamespace(objects=_Mgr())
+    try:
+        assert p._retry_failed_refreshes({}) == {"trex": "ok"}
+        assert calls == [(["trex"], "last refresh failed")]
+        assert seen["id__in"] == [10, 11] and seen["is_active"] is True
+        accts[0].status = "success"                 # nothing failed -> no refresh at all
+        calls.clear()
+        assert p._retry_failed_refreshes({}) == {} and calls == []
+    finally:
+        fv.M3UAccount = saved
+
+
 def test_health_title_all_ok_has_no_warning():
     ok = {"name": "trex", "checks": [("Live", "ok", "")]}
     assert fv._health_title([ok]) == "Failovarr provider check: all OK"

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.2
+
+- **Nightly run retries a failed playlist refresh.** If a provider's last refresh failed (a
+  one-off provider error at refresh time, say), the nightly run refreshes it once more before
+  reconciling, so a single bad moment doesn't leave you on yesterday's streams and PPV events
+  all day. Nothing extra happens on days nothing failed. The notification reports the retry;
+  if it still fails, the provider health check alerts as usual. New setting **Retry a failed
+  playlist refresh before the nightly run** (default on).
+
 ## v0.6.1
 
 - **New option: Send event slots to PPV instead** (default off; needs PPV events on). The

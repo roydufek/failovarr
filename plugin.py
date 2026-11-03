@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -173,6 +173,7 @@ _SCHED_DEFAULTS = {
     "group_governance": False,
     "group_governance_auto": False,
     "governance_refresh": True,
+    "provider_refresh_retry": True,
     "provider_health_check": True,
     "provider_health_vod": True,
     "provider_health_min_mbps": 15,
@@ -617,6 +618,16 @@ def _refresh_lines(results):
     lines = ["Playlist refresh (to import the kept groups):"]
     for name, res in results.items():
         lines.append("  • %s — %s" % (name, _REFRESH_LABELS.get(res, res)))
+    return lines
+
+
+def _retry_lines(results):
+    """Report lines for the nightly retry of a failed playlist refresh."""
+    if not results:
+        return []
+    lines = ["Playlist retry (its last refresh had failed):"]
+    for name, res in results.items():
+        lines.append("  • %s — %s" % (name, "recovered" if res == "ok" else "still failing (%s) — using its last good streams" % res))
     return lines
 
 
@@ -1415,6 +1426,19 @@ class Plugin:
                     "waits for it (up to 10 min), then reconciles — the channels land the same "
                     "run. Only fires on days something new was enabled. Note: the refresh also "
                     "rebuilds that provider's VOD in the background for a few minutes."
+                ),
+            },
+            {
+                "id": "provider_refresh_retry",
+                "label": "Retry a failed playlist refresh before the nightly run",
+                "type": "boolean",
+                "default": True,
+                "help_text": (
+                    "If a provider's last playlist refresh failed (a one-off provider error, say), "
+                    "the nightly run refreshes it once more before reconciling, so you don't spend "
+                    "the day on yesterday's streams and events. One provider at a time, waits up "
+                    "to 10 minutes. Skipped on days nothing failed. The notification says what "
+                    "happened; if it still fails, the provider health check alerts you."
                 ),
             },
             {
@@ -3231,7 +3255,17 @@ class Plugin:
         state, detail = _speed_verdict(state, detail, mbps, min_mbps)
         return (label, state, detail)
 
-    def _refresh_accounts(self, accounts, timeout=REFRESH_TIMEOUT_SECS):
+    def _retry_failed_refreshes(self, settings):
+        """Nightly self-heal: a provider whose last playlist refresh FAILED gets one more
+        try before the reconcile, so a one-off provider error doesn't leave a day-old
+        lineup and PPV set. Returns {account_name: result}; {} when nothing had failed."""
+        ids = [a.id for a in self._resolve_providers(settings)]
+        failed = list(M3UAccount.objects.filter(id__in=ids, status="error", is_active=True))
+        if not failed:
+            return {}
+        return self._refresh_accounts(failed, why="last refresh failed")
+
+    def _refresh_accounts(self, accounts, timeout=REFRESH_TIMEOUT_SECS, why="to import newly enabled groups"):
         """Refresh M3U accounts ONE AT A TIME and wait for each to finish, so groups just
         enabled get their streams imported (Dispatcharr only imports ENABLED groups, and new
         groups arrive disabled). Sequential on purpose: simultaneous refreshes on the same
@@ -3255,7 +3289,7 @@ class Plugin:
                 logger.exception("[Failovarr] governance refresh: could not queue %s", acct.name)
                 results[acct.name] = "unavailable"
                 continue
-            logger.info("[Failovarr] governance refresh: refreshing %s to import newly enabled groups", acct.name)
+            logger.info("[Failovarr] playlist refresh: refreshing %s (%s)", acct.name, why)
             start = time.time()
             res, seen_busy = "timeout", False
             while time.time() - start < timeout:
@@ -3273,7 +3307,7 @@ class Plugin:
                     res = "ok" if st == "success" else "error"
                     break
             results[acct.name] = res
-            logger.info("[Failovarr] governance refresh: %s -> %s (%.0fs)", acct.name, res, time.time() - start)
+            logger.info("[Failovarr] playlist refresh: %s -> %s (%.0fs)", acct.name, res, time.time() - start)
         return results
 
     def _gotify_group_alert(self, settings, pending, mode, flipped, refreshed=None):
@@ -3520,12 +3554,21 @@ class Plugin:
                     self._group_governance(cfg, mode=gmode, do_reconcile=False)
                 except Exception:
                     logger.exception("failovarr scheduled group-governance failed")
+            # After governance (its own refresh may already have cleared the failure).
+            retried = {}
+            if bool(cfg.get("provider_refresh_retry", True)):
+                try:
+                    retried = self._retry_failed_refreshes(cfg)
+                except Exception:
+                    logger.exception("failovarr playlist refresh retry failed")
             report = self._run_job(dry_run=False, settings=cfg, mode="reconcile")
             ok = bool(report and report.get("status") == "done")
             st = (report or {}).get("stats", {}) or {}
             changed = (st.get("created", 0) or 0) + (st.get("updated", 0) or 0) + (st.get("pruned", 0) or 0)
             # Full multi-line report in the notification (not just the one-line summary).
             notify_body = self._format_report(report) if report else "no report"
+            if retried:
+                notify_body = "\n".join(_retry_lines(retried)) + "\n\n" + notify_body
             # Refresh PPV events once, right after the daily reconcile — a once-a-day
             # client only sees a daily snapshot anyway, and failover works at playback
             # without a refresh. (Intra-day cadence is opt-in via _ppv_tick.)

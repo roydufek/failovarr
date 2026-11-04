@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -619,6 +619,20 @@ def _refresh_lines(results):
     for name, res in results.items():
         lines.append("  • %s — %s" % (name, _REFRESH_LABELS.get(res, res)))
     return lines
+
+
+def _baseline_new_accounts(baseline, current):
+    """Baseline any provider account governance hasn't seen. A new account's groups aren't
+    "new groups" for the user to approve — it just arrived with its whole catalog, so auto
+    mode must not enable them. Mutates baseline; returns the account names added."""
+    added = []
+    if not baseline:  # very first run: the caller baselines everything
+        return added
+    for name, types in current.items():
+        if name not in baseline:
+            baseline[name] = {"live": sorted(types["live"]), "vod": sorted(types["vod"])}
+            added.append(name)
+    return added
 
 
 def _retry_lines(results):
@@ -2942,6 +2956,10 @@ class Plugin:
         gov = self._read_gov()
         baseline = gov.get("baseline", {})
         first_run = not baseline
+        new_accounts = _baseline_new_accounts(baseline, current)
+        if new_accounts:
+            gov["baseline"] = baseline
+            self._write_gov(gov)
 
         # pending = current groups not yet in the baseline (Roy hasn't decided on them).
         pending = []  # (acct, typ, name, is_foreign)
@@ -3009,6 +3027,17 @@ class Plugin:
 
         report["message"] = self._format_gov(mode, pending, keep, skip, flipped, report["enabled"],
                                              report.get("refreshed"))
+        if new_accounts:
+            # Governance leaves a new account's groups alone, but whatever is enabled on it
+            # still feeds the lineup — and a new account usually arrives with everything on.
+            counts = ["%s: %d live groups enabled" % (
+                a.name, ChannelGroupM3UAccount.objects.filter(m3u_account=a, enabled=True).count())
+                for a in providers if a.name in new_accounts]
+            note = ("New provider account — its groups are recorded, none changed. Every enabled "
+                    "group becomes channels, so review them in Dispatcharr.\n  • " + "\n  • ".join(counts))
+            report["message"] = note + "\n\n" + report["message"]
+            if mode in ("scan", "auto"):
+                self._gotify_send(settings, "Failovarr 🆕 new provider", note, 5)
         return report
 
     # ------------------------------------------------------- provider health check

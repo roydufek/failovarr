@@ -512,6 +512,21 @@ def test_slot_settings_defaults():
     assert ids.index("event_slots_to_ppv") == ids.index("stable_event_slots") + 1
 
 
+def test_baseline_new_accounts():
+    cur = {"trex": {"live": {"A"}, "vod": set()}, "trex2": {"live": {"B", "A"}, "vod": {"C"}}}
+    base = {"trex": {"live": ["A"], "vod": []}}
+    assert fv._baseline_new_accounts(base, cur) == ["trex2"]
+    assert base["trex2"] == {"live": ["A", "B"], "vod": ["C"]}
+    assert base["trex"] == {"live": ["A"], "vod": []}          # known account untouched
+    assert fv._baseline_new_accounts(base, cur) == []          # second pass: nothing new
+    # A NEW GROUP on a known account is still pending, not swallowed by the baseline.
+    cur["trex"]["live"].add("NEW")
+    assert fv._baseline_new_accounts(base, cur) == []
+    assert "NEW" not in base["trex"]["live"]
+    empty = {}
+    assert fv._baseline_new_accounts(empty, cur) == [] and empty == {}   # first run: caller's job
+
+
 def test_retry_lines():
     assert fv._retry_lines({}) == []
     out = "\n".join(fv._retry_lines({"trex": "ok", "strong": "error"}))

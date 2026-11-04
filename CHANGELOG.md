@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.3
+
+- **Fix: adding a provider no longer floods group governance.** A newly added account's
+  whole catalog counted as "new groups", so auto mode would enable all the non-foreign ones.
+  Governance now records a new account's groups without touching them and sends one
+  notification saying how many are enabled. Dispatcharr usually enables everything on a new
+  account and every enabled group becomes channels, so review them before the next run.
+
 ## v0.6.2
 
 - **Nightly run retries a failed playlist refresh.** If a provider's last refresh failed (a

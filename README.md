@@ -163,6 +163,10 @@ watches, classifies, and notifies so you *opt in* instead of cleaning up after a
 - **Enforces the safe default.** While governance is on, each run forces Dispatcharr's
   `auto-enable new groups` (live / VOD / series) **off** on every provider account — so
   new groups can't go live behind your back. You don't have to set it yourself.
+- **Adding a provider.** A new account's groups are recorded as its baseline, not treated
+  as new, and you get one notification. Dispatcharr usually enables everything on a new
+  account, and every enabled group becomes channels, so match its groups to what you want
+  before the next run.
 - **Baseline.** The first run records every current group as the baseline (no noise).
   From then on it only ever looks at **new group names not in that baseline** — the
   *diff*. It never re-examines groups it already knows about.

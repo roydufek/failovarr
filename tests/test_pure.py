@@ -512,6 +512,17 @@ def test_slot_settings_defaults():
     assert ids.index("event_slots_to_ppv") == ids.index("stable_event_slots") + 1
 
 
+def test_scrub_urls():
+    msg = ("Failed to get categories from XC server: 404 Client Error: Not Found for url: "
+           "http://host.example/player_api.php?username=abc&password=def&action=get_live_categories")
+    out = fv._scrub_urls(msg)
+    assert "abc" not in out and "def" not in out and "player_api" not in out
+    assert out.endswith("for url: <url>")
+    assert "password=" not in fv._scrub_urls(msg[:120])          # cut mid-URL by msg[:160]
+    assert fv._scrub_urls("200 — 5.0 Mbps — NF - Santana (2020)") == "200 — 5.0 Mbps — NF - Santana (2020)"
+    assert fv._scrub_urls(None) == ""
+
+
 def test_baseline_new_accounts():
     cur = {"trex": {"live": {"A"}, "vod": set()}, "trex2": {"live": {"B", "A"}, "vod": {"C"}}}
     base = {"trex": {"live": ["A"], "vod": []}}

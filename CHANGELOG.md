@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.4
+
+- **Fix: provider credentials could appear in a health alert.** When a playlist refresh failed,
+  the provider check quoted Dispatcharr's error text, which can include the full request URL
+  with your provider username and password. URLs are now removed from every health-check
+  detail before it reaches the log, Gotify or the screen. If you've had a "last refresh FAILED"
+  alert, check it for credentials and delete it.
+- **The nightly provider check now logs its full detail**, one line per check, so a warning
+  can be read from the Dispatcharr log and not only from Gotify.
+
 ## v0.6.3
 
 - **Fix: adding a provider no longer floods group governance.** A newly added account's

@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -647,6 +647,13 @@ def _retry_lines(results):
 
 # ---------------------------------------------------------------- provider health
 _HEALTH_MARK = {"ok": "✔", "fail": "✖", "warn": "⚠", "skip": "•"}
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _scrub_urls(text):
+    """Provider error text quotes the full request URL, and XC URLs carry the username and
+    password. Nothing health-related may reach a log, Gotify or the screen with one in it."""
+    return _URL_RE.sub("<url>", str(text or ""))
 
 
 def _aware_utc(dt):
@@ -3065,6 +3072,9 @@ class Plugin:
             logger.exception("failovarr scheduled provider health check failed")
             return
         logger.info("[Failovarr] provider health: %s", _health_title(results))
+        for line in _health_lines(results):  # full detail, so a warning can be read from the log
+            if line:
+                logger.info("[Failovarr] provider health:   %s", line)
         if _health_problem(results) and (cfg.get("gotify_notify") or "off").strip() != "off":
             self._gotify_send(cfg, _health_title(results), "\n".join(_health_lines(results)), 7)
 
@@ -3100,7 +3110,7 @@ class Plugin:
                 v = safe("VOD", self._hc_vod, acct, profile, ua, min_mbps)
                 if v:
                     checks.append(v)
-            results.append({"name": acct.name, "checks": checks})
+            results.append({"name": acct.name, "checks": [(l, st, _scrub_urls(d)) for (l, st, d) in checks]})
         return results
 
     def _hc_playlist(self, acct):

@@ -357,7 +357,9 @@ fixed):
 - **VOD** — read ~8 s of up to 3 movies; catches "live works but VOD is blocked from this
   VPN server". Movie downloads aren't bitrate-throttled, so this is **what the exit can
   really carry** — you're **warned if it's below the speed threshold** (default 15 Mbps; a
-  4K stream needs ~20–25).
+  4K stream needs ~20–25). One slow movie can just be a slow file, so before warning, the
+  nightly check waits ~5½ minutes (some providers refuse a new movie read until the last one
+  times out) and reads a **different** movie: fast → passes with a note; slow again → warns.
 
 Each live/VOD line also shows the **time to first byte**; the check allows up to 20 s
 (redirected live streams can take that long to start, and shorter waits false-alarm).

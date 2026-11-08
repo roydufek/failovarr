@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -124,6 +124,9 @@ SCHED_COOLDOWN_SECS = 15 * 60
 # (Dispatcharr only imports streams for ENABLED groups). Per-account wait cap; on timeout
 # the run carries on and the channels arrive with the next regular refresh.
 REFRESH_TIMEOUT_SECS = 600
+# A slow nightly VOD read is re-checked on a 2nd movie after this long: strong holds an
+# abandoned VOD session ~5 min and refuses new reads (407) until it lets go.
+VOD_RECHECK_WAIT_SECS = 330
 MAX_DAILY_ATTEMPTS = 3        # hard cap on scheduled runs per day (stops retry/notify spam)
 # A crashed holder is reclaimed IMMEDIATELY via the pid-liveness check; this age-only
 # ceiling is just the backstop for the rare pid-reuse case, set well above any real run
@@ -693,6 +696,21 @@ def _fmt_rate(m):
     if not m:
         return ""
     return "%.1f Mbps, first byte %.1fs" % (m.get("mbps", 0.0), m.get("ttfb", 0.0))
+
+
+def _recheck_verdict(detail, second, min_mbps):
+    """Judge a slow VOD read against a re-check on a DIFFERENT movie. One slow title is a
+    slow file; two in a row point at the exit. second = None when the re-check couldn't
+    run, else (ok, code, title, metrics). Returns (state, detail)."""
+    if not second:
+        return ("warn", detail + " — couldn't re-check a 2nd title (provider busy)")
+    ok, code, title, met = second
+    mbps = (met or {}).get("mbps")
+    if not ok:
+        return ("warn", detail + " — 2nd title couldn't be read (%s)" % code)
+    if mbps is not None and min_mbps and mbps < min_mbps:
+        return ("warn", detail + " — 2nd title also slow: %s — %s" % (_fmt_rate(met), title))
+    return ("ok", "%s — %s (re-check: the 1st title was slow, not the exit)" % (_fmt_rate(met), title))
 
 
 def _speed_verdict(state, detail, mbps, min_mbps):
@@ -3067,7 +3085,7 @@ class Plugin:
             return
         _touch(marker)
         try:
-            results = self._provider_health(cfg)
+            results = self._provider_health(cfg, recheck_wait=VOD_RECHECK_WAIT_SECS)
         except Exception:
             logger.exception("failovarr scheduled provider health check failed")
             return
@@ -3078,7 +3096,7 @@ class Plugin:
         if _health_problem(results) and (cfg.get("gotify_notify") or "off").strip() != "off":
             self._gotify_send(cfg, _health_title(results), "\n".join(_health_lines(results)), 7)
 
-    def _provider_health(self, settings):
+    def _provider_health(self, settings, recheck_wait=0):
         """Per provider: playlist refresh, account status, a live channel, a movie.
         Returns [{"name": acct, "checks": [(label, state, detail), ...]}]."""
         cfg = self._engine_cfg(settings, self._region_allow(settings))
@@ -3107,7 +3125,7 @@ class Plugin:
             min_mbps = float(settings.get("provider_health_min_mbps", 15) or 0)
             checks.append(safe("Live", self._hc_live, acct, profile, ua, cfg))
             if want_vod:
-                v = safe("VOD", self._hc_vod, acct, profile, ua, min_mbps)
+                v = safe("VOD", self._hc_vod, acct, profile, ua, min_mbps, recheck_wait)
                 if v:
                     checks.append(v)
             results.append({"name": acct.name, "checks": [(l, st, _scrub_urls(d)) for (l, st, d) in checks]})
@@ -3263,7 +3281,7 @@ class Plugin:
             detail = detail.replace(" Mbps,", " Mbps (channel bitrate),", 1)
         return (label, state, detail)
 
-    def _hc_vod(self, acct, profile, ua, min_mbps=0):
+    def _hc_vod(self, acct, profile, ua, min_mbps=0, recheck_wait=0):
         props = acct.custom_properties if isinstance(acct.custom_properties, dict) else {}
         if acct.account_type != "XC" or not props.get("enable_vod"):
             return None
@@ -3276,22 +3294,49 @@ class Plugin:
         cats = list(M3UVODCategoryRelation.objects.filter(m3u_account=acct, enabled=True).values_list("category_id", flat=True))
         ids = list(M3UMovieRelation.objects.filter(m3u_account=acct, category_id__in=cats).values_list("id", flat=True)[:5000])
         attempts = []
-        for rid in random.sample(ids, min(3, len(ids))):
+        tried = set()
+
+        def read(rid):
+            tried.add(rid)
             rel = M3UMovieRelation.objects.select_related("movie").filter(id=rid).first()
             if not rel:
-                continue
+                return None
             try:
                 url = rel.get_stream_url(profile)
             except Exception:
                 url = None
             ok, code, msg, met = self._hc_measure(url, ua, 8)
-            attempts.append((ok, code, msg, rel.movie.name if rel.movie else rel.stream_id, met))
-            if ok:
+            return (ok, code, msg, rel.movie.name if rel.movie else rel.stream_id, met)
+
+        for rid in random.sample(ids, min(3, len(ids))):
+            a = read(rid)
+            if not a:
+                continue
+            attempts.append(a)
+            if a[0]:
                 break
         label, state, detail = _summarize_attempts("VOD", attempts, "VOD may be blocked from this VPN exit")
         win = next((a for a in attempts if a[0]), None)
         mbps = (win[4] or {}).get("mbps") if win and len(win) > 4 else None
         state, detail = _speed_verdict(state, detail, mbps, min_mbps)
+        slow = win is not None and state == "warn"
+        if slow and not recheck_wait:
+            detail += " — one title only (the nightly check re-tests a 2nd title before alerting)"
+        elif slow:
+            # One slow file isn't a slow exit: wait out the provider's hold on the session we
+            # just closed, then read a different movie.
+            logger.info("[Failovarr] provider health: %s VOD slow on one title; re-checking another in %ds",
+                        acct.name, recheck_wait)
+            end = time.time() + recheck_wait
+            while time.time() < end and not self._cancel.is_set():
+                time.sleep(5)
+            second = None
+            rest = [i for i in ids if i not in tried]
+            if rest and not self._cancel.is_set() and not self._hc_in_use(profile):
+                b = read(random.choice(rest))
+                if b:
+                    second = (b[0], b[1] or b[2], b[3], b[4])
+            state, detail = _recheck_verdict(detail, second, min_mbps)
         return (label, state, detail)
 
     def _retry_failed_refreshes(self, settings):

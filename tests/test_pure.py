@@ -512,6 +512,20 @@ def test_slot_settings_defaults():
     assert ids.index("event_slots_to_ppv") == ids.index("stable_event_slots") + 1
 
 
+def test_recheck_verdict():
+    d = "200 — 4.1 Mbps, first byte 1.1s — The Glorias — below 15 Mbps"
+    fast = (True, 200, "Sweet Navidad", {"mbps": 178.5, "ttfb": 1.1})
+    st, det = fv._recheck_verdict(d, fast, 15)
+    assert st == "ok" and "178.5 Mbps" in det and "1st title was slow" in det and "Sweet Navidad" in det
+    st, det = fv._recheck_verdict(d, (True, 200, "Frantz", {"mbps": 6.0, "ttfb": 1.0}), 15)
+    assert st == "warn" and "2nd title also slow" in det and det.startswith(d)
+    st, det = fv._recheck_verdict(d, (False, 407, "X", None), 15)
+    assert st == "warn" and "(407)" in det
+    st, det = fv._recheck_verdict(d, None, 15)
+    assert st == "warn" and "provider busy" in det
+    assert fv.VOD_RECHECK_WAIT_SECS > 300            # must outlast strong's ~5 min VOD hold
+
+
 def test_scrub_urls():
     msg = ("Failed to get categories from XC server: 404 Client Error: Not Found for url: "
            "http://host.example/player_api.php?username=abc&password=def&action=get_live_categories")

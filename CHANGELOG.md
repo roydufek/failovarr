@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.5
+
+- **A slow movie read is re-checked before it alerts.** The nightly provider check reads one
+  movie, and one slow file looked the same as a slow VPN exit. Now, when the read is below the
+  speed threshold, the check waits ~5½ minutes (some providers refuse a new movie read until
+  the previous session times out) and reads a different movie. Fast → passes, noting the first
+  title was slow. Slow again → warns as before. The re-check only runs on nights a read was
+  slow, and only in the nightly run; the "Check providers now" button says one title was slow.
+
 ## v0.6.4
 
 - **Fix: provider credentials could appear in a health alert.** When a playlist refresh failed,

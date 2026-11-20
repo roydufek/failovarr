@@ -512,6 +512,32 @@ def test_slot_settings_defaults():
     assert ids.index("event_slots_to_ppv") == ids.index("stable_event_slots") + 1
 
 
+def test_run_lock_is_exclusive_and_never_empty():
+    import tempfile, os as _os, time as _time
+    td = tempfile.mkdtemp()
+    saved = (fv.SCHED_DIR, fv.RUN_LOCK)
+    fv.SCHED_DIR, fv.RUN_LOCK = td, _os.path.join(td, "run.lock")
+    try:
+        p = fv.Plugin.__new__(fv.Plugin)
+        assert p._acquire_lock() is True
+        assert open(fv.RUN_LOCK).read().count("|") == 1          # appeared WITH its contents
+        assert p._acquire_lock() is False                         # held by a live pid (us)
+        assert sorted(_os.listdir(td)) == ["run.lock"]           # temp file cleaned up
+        p._release_lock()
+        # The 2026-11-19 race: an EMPTY lock that was just created must not count as stale.
+        open(fv.RUN_LOCK, "w").close()
+        assert p._lock_is_stale() is False
+        assert p._acquire_lock() is False
+        old = _time.time() - fv.LOCK_YOUNG_SECS - 5               # ...but a long-dead empty one is
+        _os.utime(fv.RUN_LOCK, (old, old))
+        assert p._lock_is_stale() is True
+        assert p._acquire_lock() is True
+        p._release_lock()
+        assert _os.listdir(td) == []
+    finally:
+        fv.SCHED_DIR, fv.RUN_LOCK = saved
+
+
 def test_recheck_verdict():
     d = "200 — 4.1 Mbps, first byte 1.1s — The Glorias — below 15 Mbps"
     fast = (True, 200, "Sweet Navidad", {"mbps": 178.5, "ttfb": 1.1})

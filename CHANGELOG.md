@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.6
+
+- **Fix: the nightly run could run twice.** Two web workers checking the schedule in the same
+  millisecond could both start the run: the run lock was created empty and filled a moment later,
+  and a worker that read it in between took it for a leftover, deleted it and ran too. You'd see
+  every nightly notification twice, and both runs created the same new channels, leaving untracked
+  duplicates that are never cleaned up. The lock now appears with its contents in one step, and a
+  just-created lock is never treated as a leftover. If you got doubled notifications, look for
+  duplicate channels (same name and number) created at that run.
+
 ## v0.6.5
 
 - **A slow movie read is re-checked before it alerts.** The nightly provider check reads one

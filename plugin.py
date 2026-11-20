@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - defensive: never block on websocket impo
     def send_websocket_update(*_a, **_k):
         return None
 
-__version__ = "0.6.5"
+__version__ = "0.6.6"
 
 logger = logging.getLogger("plugins.failovarr")
 
@@ -133,6 +133,7 @@ MAX_DAILY_ATTEMPTS = 3        # hard cap on scheduled runs per day (stops retry/
 # (reconciles take seconds; even a seed + EPG refresh is a couple of minutes) so a
 # legitimate long run is never stolen out from under itself.
 LOCK_STALE_SECS = 60 * 60
+LOCK_YOUNG_SECS = 120  # an unreadable lock younger than this is mid-creation, not stale
 BACKUP_KEEP = 7
 
 # ---------------------------------------------------------------- defaults
@@ -1760,14 +1761,29 @@ class Plugin:
 
     # --------------------------------------------------------- cross-proc lock
     def _acquire_lock(self):
+        """Take the run lock. The lock must appear WITH its contents in one step: with a
+        create-then-write, a 2nd worker could read the still-empty file, call it stale,
+        delete it and run too (both nightly runs fired 2026-11-19). So the payload goes to a
+        private temp file that is hard-linked into place, which fails if a lock exists."""
         os.makedirs(SCHED_DIR, exist_ok=True)
         payload = f"{os.getpid()}|{time.time()}".encode()
+        tmp = "%s.%d.%d" % (RUN_LOCK, os.getpid(), threading.get_ident())
         for _ in range(3):
             try:
-                fd = os.open(RUN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, payload)
-                os.close(fd)
-                return True
+                with open(tmp, "wb") as fh:
+                    fh.write(payload)
+                try:
+                    os.link(tmp, RUN_LOCK)
+                    return True
+                except FileExistsError:
+                    raise
+                except OSError:
+                    # Filesystem without hard links: exclusive create, still never empty
+                    # for long, and a young unreadable lock isn't treated as stale.
+                    fd = os.open(RUN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(fd, payload)
+                    os.close(fd)
+                    return True
             except FileExistsError:
                 if not self._lock_is_stale():
                     return False
@@ -1778,6 +1794,11 @@ class Plugin:
                     pass
                 except Exception:
                     return False
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
         return False
 
     def _lock_is_stale(self):
@@ -1785,8 +1806,14 @@ class Plugin:
             with open(RUN_LOCK, "r") as fh:
                 pid_s, ts_s = fh.read().strip().split("|")
             pid, ts = int(pid_s), float(ts_s)
-        except Exception:
+        except FileNotFoundError:
             return True
+        except Exception:
+            # Unreadable / empty: only stale once it's clearly not mid-creation.
+            try:
+                return (time.time() - os.path.getmtime(RUN_LOCK)) > LOCK_YOUNG_SECS
+            except OSError:
+                return True
         if (time.time() - ts) > LOCK_STALE_SECS:
             return True
         return not _pid_alive(pid)
